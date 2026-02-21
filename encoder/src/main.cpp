@@ -2,6 +2,7 @@
 #include <vector>
 #include "ImageConverter.hpp" // Include our new converter
 #include "VoxelGrid.hpp"
+#include "Cluster.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h" // Note: CMake handles the path now!
@@ -13,7 +14,9 @@ int main() {
 
     if (!imgData) return 1;
 
-    float epsilon = 1.0f; // This is your quantization "strength"
+    float epsilon = 5.0f; // This is your quantization "strength"
+    // Instead of a float distance, we use an integer step count
+    int maxStepsFromRoot = 3; 
     VoxelMap grid;
 
     // This loop visits every single pixel once
@@ -51,25 +54,25 @@ int main() {
 
     
 
-    // Iterate through the map
-    for (auto const& [coord, data] : grid) {
-        std::cout << "Voxel Index: [" << coord.l_idx << ", " << coord.a_idx << ", " << coord.b_idx << "]" << std::endl;
-        std::cout << "  Total Pixels in Voxel: " << data.totalPixelCount << std::endl;
-        std::cout << "  Unique Colors inside: " << data.colorFrequencies.size() << std::endl;
 
-        // Iterate through the colors inside this specific voxel
-        for (auto const& [color, count] : data.colorFrequencies) {
-            std::cout << "    - Color (L:" << color.L << ", a:" << color.a << ", b:" << color.b 
-                    << ") -> Count: " << count << std::endl;
+    std::vector<Cluster> finalClusters = Clusterer::run(grid, maxStepsFromRoot);
+
+    std::cout << "\n--- Final Cluster Analysis ---" << std::endl;
+    for (size_t i = 0; i < finalClusters.size(); ++i) {
+        Cluster::ClusterStats stats = finalClusters[i].getStats();
+        
+        // Only print interesting clusters or the first few to keep the terminal clean
+        if (i < 5) {
+            std::cout << "Cluster #" << i << ":" << std::endl;
+            std::cout << "  Pixels: " << finalClusters[i].totalPixels << std::endl;
+            std::cout << "  Centroid Lab: (" << stats.centroid.L << ", " 
+                    << stats.centroid.a << ", " << stats.centroid.b << ")" << std::endl;
+            std::cout << "  Max Error: " << stats.maxError << std::endl;
+            std::cout << "-----------------------" << std::endl;
         }
-        std::cout << "-----------------------" << std::endl;
-    }
+}
 
-    std::cout << "Original Pixels: " << width * height << std::endl;
-    std::cout << "Non-empty Voxels: " << grid.size() << std::endl;
-    std::cout << "Compression Ratio (Color space): " << (float)(width * height) / grid.size() << ":1" << std::endl;
-
-    
+        
 
     stbi_image_free(imgData);
     return 0;
