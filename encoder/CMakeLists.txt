@@ -10,6 +10,6 @@ include_directories(include)
 include_directories(lib)
 
 # Create the executable "encoder" from your source file
-add_executable(encoder src/main.cpp)
+add_executable(encoder src/main.cpp src/ImageConverter.cpp)
 
 # Optional: If you use math libraries later, you'd link them here
