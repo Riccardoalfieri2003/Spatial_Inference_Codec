@@ -7,16 +7,36 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h" // Note: CMake handles the path now!
 
-int main() {
+#include <iostream>
+#include <string> // For std::stof and std::stoi
+
+
+int main(int argc, char* argv[]) {
+    // Check if the user provided enough arguments
+    if (argc < 3) {
+        std::cout << "Usage: " << argv[0] << " <epsilon> <max_steps>" << std::endl;
+        std::cout << "Example: " << argv[0] << " 5.0 2" << std::endl;
+        return 1;
+    }
+
+    // Convert command line strings to float and int
+    // argv[0] is the program name, so we start at index 1
+    float epsilon = std::stof(argv[1]);
+    int maxStepsFromRoot = std::stoi(argv[2]);
+
+    std::cout << "Running Encoder with Epsilon: " << epsilon 
+              << " and Max Steps: " << maxStepsFromRoot << std::endl;
+
+    // ... your image loading code ...
     const char* filename = "../data/images/Lenna.png";
     int width, height, channels;
     unsigned char* imgData = stbi_load(filename, &width, &height, &channels, 0);
 
-    if (!imgData) return 1;
+    if (!imgData) {
+        std::cerr << "Failed to load image." << std::endl;
+        return 1;
+    }
 
-    float epsilon = 5.0f; // This is your quantization "strength"
-    // Instead of a float distance, we use an integer step count
-    int maxStepsFromRoot = 3; 
     VoxelMap grid;
 
     // This loop visits every single pixel once
@@ -56,6 +76,8 @@ int main() {
 
 
     std::vector<Cluster> finalClusters = Clusterer::run(grid, maxStepsFromRoot);
+    std::cout << "Clusters generated: " << finalClusters.size() << std::endl;
+
 
     std::cout << "\n--- Final Cluster Analysis ---" << std::endl;
     for (size_t i = 0; i < finalClusters.size(); ++i) {
