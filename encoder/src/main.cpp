@@ -3,6 +3,7 @@
 #include "ImageConverter.hpp" // Include our new converter
 #include "VoxelGrid.hpp"
 #include "Cluster.hpp"
+#include "FileHandler.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h" // Note: CMake handles the path now!
@@ -77,7 +78,6 @@ int main(int argc, char* argv[]) {
     ClusteringResult result = Clusterer::run(grid, maxStepsFromRoot);
 
     // 2. Build the Palette [L, a, b, e]
-    struct PaletteEntry { float L, a, b, error; };
     std::vector<PaletteEntry> palette;
 
     for (const auto& cluster : result.clusters) {
@@ -140,6 +140,8 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "\nReady for file serialization!" << std::endl;
+
+    saveSIF_claude("output_claude.sif", width, height, palette, indexMatrix);
         
 
     stbi_image_free(imgData);
