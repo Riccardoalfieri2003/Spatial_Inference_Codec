@@ -4,6 +4,7 @@
 #include "VoxelGrid.hpp"
 #include <vector>
 
+
 struct Cluster {
     // Total aggregated frequency table for this cluster
     std::map<LabPixel, int, LabComparator> colorFrequencies;
@@ -59,17 +60,23 @@ struct Cluster {
 #include <queue>
 #include <vector>
 
+// A simple wrapper to return both the clusters and the mapping
+struct ClusteringResult {
+    std::vector<Cluster> clusters;
+    std::unordered_map<VoxelCoord, int, VoxelHash> voxelToClusterIdx;
+};
+
 class Clusterer {
 public:
-    static std::vector<Cluster> run(VoxelMap& grid, int maxSteps) {
-        std::vector<Cluster> clusters;
+    static ClusteringResult run(VoxelMap& grid, int maxSteps) {
+        ClusteringResult result;
         std::unordered_set<VoxelCoord, VoxelHash> visited;
+        int currentClusterIdx = 0;
 
         for (auto const& [startCoord, data] : grid) {
             if (visited.count(startCoord)) continue;
 
             Cluster currentCluster;
-            // Queue stores: {The Voxel Coordinate, Distance from the Root Voxel}
             std::queue<std::pair<VoxelCoord, int>> q;
 
             q.push({startCoord, 0});
@@ -79,12 +86,14 @@ public:
                 auto [current, distFromRoot] = q.front();
                 q.pop();
 
+                // Assign this voxel to the current cluster
                 currentCluster.addVoxel(grid[current]);
+                
+                // CRITICAL ADDITION: Record the link for the Index Matrix
+                result.voxelToClusterIdx[current] = currentClusterIdx;
 
-                // If we've reached the max distance from the root, don't look for more neighbors
                 if (distFromRoot >= maxSteps) continue;
 
-                // Check all 26 "Chess Queen" neighbors
                 for (int dl = -1; dl <= 1; ++dl) {
                     for (int da = -1; da <= 1; ++da) {
                         for (int db = -1; db <= 1; ++db) {
@@ -100,10 +109,12 @@ public:
                     }
                 }
             }
-            clusters.push_back(currentCluster);
+            result.clusters.push_back(currentCluster);
+            currentClusterIdx++; // Increment index for the next cluster found
         }
-        return clusters;
+        return result;
     }
 };
+
 
 #endif

@@ -73,27 +73,73 @@ int main(int argc, char* argv[]) {
     std::cout << "Total Non-Empty Voxels: " << grid.size() << std::endl;
 
     
+    // 1. Run the modified Clusterer
+    ClusteringResult result = Clusterer::run(grid, maxStepsFromRoot);
 
+    // 2. Build the Palette [L, a, b, e]
+    struct PaletteEntry { float L, a, b, error; };
+    std::vector<PaletteEntry> palette;
 
-    std::vector<Cluster> finalClusters = Clusterer::run(grid, maxStepsFromRoot);
-    std::cout << "Clusters generated: " << finalClusters.size() << std::endl;
+    for (const auto& cluster : result.clusters) {
+        auto stats = cluster.getStats();
+        palette.push_back({stats.centroid.L, stats.centroid.a, stats.centroid.b, stats.maxError});
+    }
 
+    // 3. Build the Index Matrix
+    // Using a 1D vector to represent the 2D image matrix
+    std::vector<int> indexMatrix(width * height);
 
-    std::cout << "\n--- Final Cluster Analysis ---" << std::endl;
-    for (size_t i = 0; i < finalClusters.size(); ++i) {
-        Cluster::ClusterStats stats = finalClusters[i].getStats();
-        
-        // Only print interesting clusters or the first few to keep the terminal clean
-        if (i < 5) {
-            std::cout << "Cluster #" << i << ":" << std::endl;
-            std::cout << "  Pixels: " << finalClusters[i].totalPixels << std::endl;
-            std::cout << "  Centroid Lab: (" << stats.centroid.L << ", " 
-                    << stats.centroid.a << ", " << stats.centroid.b << ")" << std::endl;
-            std::cout << "  Max Error: " << stats.maxError << std::endl;
-            std::cout << "-----------------------" << std::endl;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int pixelOffset = (y * width + x) * channels;
+
+            // Convert current pixel to its voxel coord again
+            LabPixel lab = ImageConverter::convertPixelRGBtoLab(
+                imgData[pixelOffset], imgData[pixelOffset+1], imgData[pixelOffset+2]
+            );
+            
+            VoxelCoord coord = {
+                static_cast<int>(std::floor(lab.L / epsilon)),
+                static_cast<int>(std::floor(lab.a / epsilon)),
+                static_cast<int>(std::floor(lab.b / epsilon))
+            };
+
+            // Assign the cluster index to this pixel
+            indexMatrix[y * width + x] = result.voxelToClusterIdx[coord];
         }
-}
+    }
 
+    std::cout << "\n--- Compression Summary ---" << std::endl;
+    std::cout << "Original Pixels:    " << width * height << std::endl;
+    std::cout << "Number of Clusters: " << palette.size() << std::endl;
+
+    // Calculate "Reduction Ratio" in terms of unique colors
+    // A standard image can have up to 16 million colors; we reduced it to palette.size()
+    float reduction = (float)(width * height) / palette.size();
+    std::cout << "Color Reduction:    " << reduction << ":1" << std::endl;
+
+    // --- Detailed Palette & Error Analysis ---
+    float avgMaxError = 0.0f;
+    float absoluteMaxError = 0.0f;
+
+    for (const auto& entry : palette) {
+        avgMaxError += entry.error;
+        if (entry.error > absoluteMaxError) absoluteMaxError = entry.error;
+    }
+    avgMaxError /= palette.size();
+
+    std::cout << "\n--- Error Metrics (Lab Space) ---" << std::endl;
+    std::cout << "Average Cluster Max-Error: " << avgMaxError << " (Perceptual distance)" << std::endl;
+    std::cout << "Worst-Case Cluster Error:  " << absoluteMaxError << std::endl;
+
+    // --- Index Matrix Verification ---
+    // Let's check the first few indices to make sure they aren't all the same
+    std::cout << "\n--- Index Matrix Sample (Top-Left 5x1) ---" << std::endl;
+    for (int i = 0; i < 5; ++i) {
+        std::cout << "Pixel [" << i << "]: Cluster Index " << indexMatrix[i] << std::endl;
+    }
+
+    std::cout << "\nReady for file serialization!" << std::endl;
         
 
     stbi_image_free(imgData);
