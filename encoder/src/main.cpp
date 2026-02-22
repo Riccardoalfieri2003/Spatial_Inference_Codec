@@ -29,7 +29,7 @@ int main(int argc, char* argv[]) {
               << " and Max Steps: " << maxStepsFromRoot << std::endl;
 
     // ... your image loading code ...
-    const char* filename = "../data/images/Lenna.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
     int width, height, channels;
     unsigned char* imgData = stbi_load(filename, &width, &height, &channels, 0);
 
