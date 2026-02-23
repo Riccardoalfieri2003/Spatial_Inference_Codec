@@ -8,6 +8,7 @@
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#include <random>
 
 
 // ── Lab → XYZ → RGB conversion ───────────────────────────────────────────────
@@ -241,6 +242,120 @@ void applyGradients(
 }
 
 
+
+
+
+
+
+
+
+
+// ── Shared helper: clamp a Lab offset to stay within the error sphere ─────────
+static LabF clampToSphere(float centerL, float centerA, float centerB,
+                           float L, float a, float b, float radius) {
+    float dL = L - centerL;
+    float da = a - centerA;
+    float db = b - centerB;
+    float dist = std::sqrt(dL*dL + da*da + db*db);
+    if (dist > radius) {
+        float scale = radius / dist;
+        dL *= scale; da *= scale; db *= scale;
+    }
+    return {centerL + dL, centerA + da, centerB + db};
+}
+
+
+// ── Version 1: Uniform sampling between gradient color and centroid ───────────
+//
+// Picks a random point on the LINE SEGMENT between the centroid and the
+// gradient-derived color. Every point on that segment is guaranteed to be
+// inside the sphere (since both endpoints are inside or on the surface).
+// The result is then clamped as a safety net for floating point edge cases.
+//
+static LabF sampleUniform(const PaletteEntry& p,   // cluster centroid + error
+                           const LabF& gradColor,   // color from gradient blending
+                           std::mt19937& rng) {
+    float radius = std::abs(p.error);
+
+    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+    float t = uni(rng);  // 0 = centroid, 1 = gradient color
+
+    float L = p.L + t * (gradColor.L - p.L);
+    float a = p.a + t * (gradColor.a - p.a);
+    float b = p.b + t * (gradColor.b - p.b);
+
+    // Safety clamp — should rarely trigger
+    return clampToSphere(p.L, p.a, p.b, L, a, b, radius);
+}
+
+
+// ── Version 2: Gaussian sampling biased toward the gradient color ─────────────
+//
+// The distribution is centered on the MIDPOINT between centroid and gradient
+// color, slightly shifted toward the gradient color (by the bias factor).
+// Sigma is chosen so that 3*sigma = distance from center to midpoint,
+// meaning the tails reach the centroid and the gradient boundary naturally.
+// Any sample that lands beyond the centroid (wrong side of sphere) is
+// reflected back, making the distribution one-sided toward the gradient color.
+//
+static LabF sampleGaussian(const PaletteEntry& p,  // cluster centroid + error
+                            const LabF& gradColor,  // color from gradient blending
+                            std::mt19937& rng,
+                            float bias = 0.6f)      // 0.5 = exact midpoint, >0.5 = lean toward gradient
+{
+    float radius = std::abs(p.error);
+
+    // Midpoint between centroid and gradient color, shifted by bias
+    // bias=0.5 → true midpoint, bias=0.6 → 60% toward gradient color
+    float midL = p.L + bias * (gradColor.L - p.L);
+    float midA = p.a + bias * (gradColor.a - p.a);
+    float midB = p.b + bias * (gradColor.b - p.b);
+
+    // Sigma: distance from midpoint to centroid, divided by 3
+    // so that 99.7% of samples stay between centroid and gradient side
+    float segLen = std::sqrt(
+        (midL - p.L) * (midL - p.L) +
+        (midA - p.a) * (midA - p.a) +
+        (midB - p.b) * (midB - p.b));
+    float sigma = std::max(segLen / 3.0f, 1e-4f);
+
+    std::normal_distribution<float> gauss(0.0f, sigma);
+
+    float L, a, b;
+    int maxTries = 8;
+    do {
+        float dL = gauss(rng);
+        float da = gauss(rng);
+        float db = gauss(rng);
+        L = midL + dL;
+        a = midA + da;
+        b = midB + db;
+
+        // Reflect samples that land on the wrong side of the centroid
+        // "Wrong side" = further from gradient color than the centroid is
+        float dotL = (L - p.L) * (gradColor.L - p.L);
+        float dotA = (a - p.a) * (gradColor.a - p.a);
+        float dotB = (b - p.b) * (gradColor.b - p.b);
+        float dot  = dotL + dotA + dotB;
+
+        if (dot >= 0.0f) break;  // on the correct side, accept
+
+        // Reflect across the centroid
+        L = p.L + (p.L - L);
+        a = p.a + (p.a - a);
+        b = p.b + (p.b - b);
+        break;
+
+    } while (--maxTries > 0);
+
+    // Final clamp to sphere
+    return clampToSphere(p.L, p.a, p.b, L, a, b, radius);
+}
+
+
+
+
+
 // ═════════════════════════════════════════════════════════════════════════════
 // main
 // ═════════════════════════════════════════════════════════════════════════════
@@ -273,8 +388,35 @@ int main(int argc, char* argv[]) {
     std::vector<uint8_t> pixels;
     pixels.reserve(data.width * data.height * 3);
 
+    // ── Choose sampling mode ──────────────────────────────────────────────────
+    // 0 = no noise (pure gradient), 1 = uniform, 2 = gaussian
+    int noiseMode = 2;
+    float gaussBias = 0.6f;  // only used in mode 2
+
+    uint32_t seed = 1234;
+    if (argc > 2) seed = (uint32_t)std::stoul(argv[2]);
+    std::mt19937 rng(seed);
+    std::cout << "Noise seed: " << seed << "\n";
+
     for (int i = 0; i < data.width * data.height; i++) {
-        RGB rgb = labToRGB(labImage[i].L, labImage[i].a, labImage[i].b);
+        const PaletteEntry& p = data.palette[data.indexMatrix[i]];
+        LabF gradColor = labImage[i];  // already has gradient applied
+
+        LabF finalColor;
+        switch (noiseMode) {
+            case 0:
+                finalColor = gradColor;
+                break;
+            case 1:
+                finalColor = sampleUniform(p, gradColor, rng);
+                break;
+            case 2:
+            default:
+                finalColor = sampleGaussian(p, gradColor, rng, gaussBias);
+                break;
+        }
+
+        RGB rgb = labToRGB(finalColor.L, finalColor.a, finalColor.b);
         pixels.push_back(rgb.r);
         pixels.push_back(rgb.g);
         pixels.push_back(rgb.b);
