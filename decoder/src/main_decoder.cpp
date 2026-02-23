@@ -96,53 +96,6 @@ static RGB sampleLabSphere(const PaletteEntry& p, std::mt19937& rng) {
     return labToRGB(p.L + dL, p.a + da, p.b + db);
 }
 
-static std::vector<uint8_t> gaussianBlur(std::vector<uint8_t> pixels, int width, int height, int radius) {
-
-    for (int pass = 0; pass < 3; pass++) {
-        std::vector<uint8_t> temp(pixels.size());
-
-        // Horizontal pass
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int rSum = 0, gSum = 0, bSum = 0, count = 0;
-                for (int dx = -radius; dx <= radius; dx++) {
-                    int nx = std::clamp(x + dx, 0, width - 1);
-                    int base = (y * width + nx) * 3;
-                    rSum += pixels[base + 0];
-                    gSum += pixels[base + 1];
-                    bSum += pixels[base + 2];
-                    count++;
-                }
-                int base = (y * width + x) * 3;
-                temp[base + 0] = (uint8_t)(rSum / count);
-                temp[base + 1] = (uint8_t)(gSum / count);
-                temp[base + 2] = (uint8_t)(bSum / count);
-            }
-        }
-
-        // Vertical pass
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int rSum = 0, gSum = 0, bSum = 0, count = 0;
-                for (int dy = -radius; dy <= radius; dy++) {
-                    int ny = std::clamp(y + dy, 0, height - 1);
-                    int base = (ny * width + x) * 3;
-                    rSum += temp[base + 0];
-                    gSum += temp[base + 1];
-                    bSum += temp[base + 2];
-                    count++;
-                }
-                int base = (y * width + x) * 3;
-                pixels[base + 0] = (uint8_t)(rSum / count);
-                pixels[base + 1] = (uint8_t)(gSum / count);
-                pixels[base + 2] = (uint8_t)(bSum / count);
-            }
-        }
-    }
-
-    return pixels;
-}
-
 int main(int argc, char* argv[]) {
 
     // ── File path ────────────────────────────────────────────────────────────
@@ -181,11 +134,6 @@ int main(int argc, char* argv[]) {
             pixels.push_back(rgb.b);
         }
     }
-
-    // ── Optional blur for debugging ──────────────────────────────────────────
-    //int blurRadius = 1;  // change this: 1 = subtle, 2 = medium, 4 = strong
-    //pixels = gaussianBlur(pixels, data.width, data.height, blurRadius);
-
 
     // ── Save as PNG ──────────────────────────────────────────────────────────
     std::string outPath = filePath + "_reconstructed.png";

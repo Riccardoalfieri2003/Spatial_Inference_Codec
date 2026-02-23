@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "VoxelGrid.hpp" // For PaletteEntry/LabPixel types
+#include "GradientEncoder.hpp"
 
 struct PaletteEntry { float L, a, b, error; };
 
@@ -106,9 +107,13 @@ void buildCodes(Node* root, std::string str, std::map<int, std::pair<uint32_t, i
 
 
 
+
+
 void saveSIF_claude(const std::string& path, int width, int height,
              const std::vector<PaletteEntry>& palette,
-             const std::vector<int>& indexMatrix) {
+             const std::vector<int>& indexMatrix,
+             const GradientData& gradients)            // ← new parameter
+{
 
     std::ofstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -212,20 +217,45 @@ void saveSIF_claude(const std::string& path, int width, int height,
         auto& [code, len] = huffmanTable[key];
         bw.write(code, len);
     }
+
+    // ... all your existing code stays exactly the same up to bw.flush() ...
+
     bw.flush();
+
+    // ── 9. Gradient section ──────────────────────────────────────────────────
+
+    // 9a. Precision flag (1 byte) — tells decoder how many bits per descriptor
+    uint8_t precisionByte = (uint8_t)gradients.precision;
+    file.write((char*)&precisionByte, 1);
+
+    // 9b. Gradient queue
+    //     We pack multiple descriptors into bytes using BitWriter
+    uint32_t queueSize = (uint32_t)gradients.queue.size();
+    file.write((char*)&queueSize, 4);
+
+    BitWriter bwGrad(file);
+    int precBits = (int)gradients.precision;
+    for (uint8_t desc : gradients.queue)
+        bwGrad.write(desc, precBits);
+    bwGrad.flush();
+
+    // 9c. Change points
+    uint32_t cpCount = (uint32_t)gradients.changePoints.size();
+    file.write((char*)&cpCount, 4);
+    for (const auto& cp : gradients.changePoints) {
+        file.write((char*)&cp.x,        2);  // uint16_t x
+        file.write((char*)&cp.y,        2);  // uint16_t y
+        file.write((char*)&cp.queueIdx, 4);  // uint32_t index into queue
+    }
+
     file.close();
 
-    // ── 8. Statistics ────────────────────────────────────────────────────────
+    // ── 10. Updated statistics ────────────────────────────────────────────────
     size_t fileSize = std::filesystem::file_size(path);
     float  bpp      = (float)(fileSize * 8) / (width * height);
-    std::cout << "\n--- RLE + Huffman Compression Complete ---\n";
-    std::cout << "Palette Size:    " << palSize              << " colors\n";
-    std::cout << "Bits Per Index:  " << bitsPerIndex         << " bits\n";
-    std::cout << "RLE Symbols:     " << rleStream.size()     << " (from " << indexMatrix.size() << " pixels)\n";
-    std::cout << "Unique Symbols:  " << huffmanTable.size()  << " Huffman symbols\n";
-    std::cout << "Original RGB:    " << (width*height*3)/1024 << " KB\n";
-    std::cout << "SIF File Size:   " << fileSize/1024         << " KB\n";
-    std::cout << "Bits Per Pixel:  " << bpp                   << " bpp\n";
+    std::cout << "\n--- Final File ---\n";
+    std::cout << "SIF File Size:   " << fileSize/1024 << " KB\n";
+    std::cout << "Bits Per Pixel:  " << bpp << " bpp\n";
     std::cout << "Compression:     " << (float)(width*height*24)/(fileSize*8) << ":1\n";
     std::cout << "Location: " << std::filesystem::absolute(path) << "\n";
 }

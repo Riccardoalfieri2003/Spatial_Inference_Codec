@@ -4,6 +4,7 @@
 #include "VoxelGrid.hpp"
 #include "Cluster.hpp"
 #include "FileHandler.hpp"
+#include "GradientEncoder.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h" // Note: CMake handles the path now!
@@ -141,7 +142,31 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\nReady for file serialization!" << std::endl;
 
-    saveSIF_claude("output_claude.sif", width, height, palette, indexMatrix);
+
+        // ── Build flat Lab array (needed by gradient encoder) ────────────────────
+    std::vector<LabPixelFlat> imgLabFlat(width * height);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int pixelOffset = (y * width + x) * channels;
+            LabPixel lab = ImageConverter::convertPixelRGBtoLab(
+                imgData[pixelOffset], imgData[pixelOffset+1], imgData[pixelOffset+2]
+            );
+            imgLabFlat[y * width + x] = {lab.L, lab.a, lab.b};
+        }
+    }
+
+    // ── Encode gradients ─────────────────────────────────────────────────────
+    // Choose precision: BITS_2, BITS_4, or BITS_6
+    GradientData gradients = encodeGradients(
+        indexMatrix,
+        imgLabFlat,
+        width, height,
+        GradientPrecision::BITS_6,  // ← change this to BITS_2 or BITS_4 for simpler images
+        1.0f                        // ← change threshold: lower = more change points detected
+    );
+
+    // ── Save ─────────────────────────────────────────────────────────────────
+    saveSIF_claude("output_claude.sif", width, height, palette, indexMatrix, gradients);
         
 
     stbi_image_free(imgData);
