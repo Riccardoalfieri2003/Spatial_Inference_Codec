@@ -161,8 +161,8 @@ int main(int argc, char* argv[]) {
         indexMatrix,
         imgLabFlat,
         width, height,
-        GradientPrecision::BITS_6,  // ← change this to BITS_2 or BITS_4 for simpler images
-        1.0f                        // ← change threshold: lower = more change points detected
+        GradientPrecision::BITS_4,  // ← change this to BITS_2 or BITS_4 for simpler images
+        5.0f                        // ← change threshold: lower = more change points detected
     );
 
     // ── Save ─────────────────────────────────────────────────────────────────

@@ -1,9 +1,9 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <map>
 #include <cmath>
 #include <algorithm>
-#include <random>
 #include "sif_decoder.hpp"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -17,21 +17,18 @@ static const float REF_Z = 108.883f;
 
 static float labInvF(float t) {
     const float delta = 6.0f / 29.0f;
-    if (t > delta)
-        return t * t * t;
-    else
-        return 3.0f * delta * delta * (t - 4.0f / 29.0f);
+    if (t > delta) return t * t * t;
+    return 3.0f * delta * delta * (t - 4.0f / 29.0f);
 }
 
 static float linearToSRGB(float val) {
     val = std::clamp(val, 0.0f, 1.0f);
-    if (val <= 0.0031308f)
-        return 12.92f * val;
-    else
-        return 1.055f * std::pow(val, 1.0f / 2.4f) - 0.055f;
+    if (val <= 0.0031308f) return 12.92f * val;
+    return 1.055f * std::pow(val, 1.0f / 2.4f) - 0.055f;
 }
 
 struct RGB { uint8_t r, g, b; };
+struct LabF { float L, a, b; };  // floating point Lab pixel
 
 static RGB labToRGB(float L, float a, float b) {
     float fy = (L + 16.0f) / 116.0f;
@@ -56,101 +53,241 @@ static RGB labToRGB(float L, float a, float b) {
 }
 
 
-// ── Gaussian sampler inside the Lab error sphere ──────────────────────────────
-//
-// For each pixel we want to pick a random Lab color inside a sphere of
-// radius = p.error, centered on (p.L, p.a, p.b).
-//
-// Strategy:
-//   1. Sample a 3D offset (dL, da, db) from a Gaussian with sigma = error/3.
-//      Using sigma = error/3 means ~99.7% of samples fall within the sphere.
-//   2. If the sampled point falls outside the sphere (rare tail), clamp it
-//      back onto the surface so we never exceed the guaranteed error radius.
-//   3. Apply the offset to the palette color.
-//
-static RGB sampleLabSphere(const PaletteEntry& p, std::mt19937& rng) {
-
-    float radius = std::abs(p.error);
-
-    // Degenerate case: no error budget, just return the exact palette color
-    if (radius < 1e-4f)
-        return labToRGB(p.L, p.a, p.b);
-
-    // Gaussian with sigma = radius/3 so that tails naturally touch the border
-    float sigma = radius / 3.0f;
-    std::normal_distribution<float> gauss(0.0f, sigma);
-
-    float dL = gauss(rng);
-    float da = gauss(rng);
-    float db = gauss(rng);
-
-    // Clamp to sphere surface if we happened to land outside
-    float dist = std::sqrt(dL*dL + da*da + db*db);
-    if (dist > radius) {
-        float scale = radius / dist;
-        dL *= scale;
-        da *= scale;
-        db *= scale;
+// ═════════════════════════════════════════════════════════════════════════════
+// Easing functions  (t is always in [0, 1])
+// ═════════════════════════════════════════════════════════════════════════════
+static float applyShape(float t, uint8_t shape) {
+    switch (shape) {
+        case 0: return t < 0.5f ? 0.0f : 1.0f;           // sharp (step)
+        case 1: return t;                                  // linear
+        case 2: return t < 0.5f                            // ease-in/out
+                    ? 2.0f * t * t
+                    : 1.0f - std::pow(-2.0f * t + 2.0f, 2.0f) / 2.0f;
+        case 3: return t * t * (3.0f - 2.0f * t);        // S-curve (smoothstep)
+        default: return t;
     }
-
-    return labToRGB(p.L + dL, p.a + da, p.b + db);
 }
 
+// Width in pixels for each width code
+static int widthPixels(uint8_t w) {
+    switch (w) {
+        case 0: return 1;
+        case 1: return 3;
+        case 2: return 6;
+        case 3: return 12;
+        default: return 3;
+    }
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Gradient application
+//
+// Strategy:
+//   1. Build a float Lab image from the index matrix (flat quantized colors).
+//   2. Find boundary pixels between different clusters.
+//   3. For each boundary pixel, look up the active gradient descriptor using
+//      the queue + change points, then blend colors across the transition zone.
+//   4. Convert the final Lab image to RGB and write PNG.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Build a map from (x,y) → active queue index using the change point list.
+// The map only contains pixels where a change point fires; all other boundary
+// pixels use the first descriptor for that cluster pair.
+static std::map<std::pair<int,int>, uint32_t>
+buildChangePointMap(const std::vector<ChangePoint>& changePoints) {
+    std::map<std::pair<int,int>, uint32_t> cpMap;
+    for (const auto& cp : changePoints)
+        cpMap[{cp.x, cp.y}] = cp.queueIdx;
+    return cpMap;
+}
+
+// Returns the active descriptor index for a given boundary pixel.
+// We look up whether this pixel (or any recent pixel on the same boundary)
+// has triggered a change point.
+static uint32_t activeQueueIdx(
+    int x, int y,
+    const std::map<std::pair<int,int>, uint32_t>& cpMap,
+    const std::map<std::pair<int,int>, uint32_t>& boundaryFirstIdx,
+    std::pair<int,int> clusterPair)
+{
+    // Check if this exact pixel is a change point
+    auto cpIt = cpMap.find({x, y});
+    if (cpIt != cpMap.end()) return cpIt->second;
+
+    // Otherwise use the first-encounter index for this cluster pair
+    auto bIt = boundaryFirstIdx.find(clusterPair);
+    if (bIt != boundaryFirstIdx.end()) return bIt->second;
+
+    return 0; // fallback
+}
+
+
+void applyGradients(
+    std::vector<LabF>&       labImage,   // in/out: flat Lab pixel buffer
+    const std::vector<int>&  indexMatrix,
+    const std::vector<PaletteEntry>& palette,
+    const GradientData&      gradients,
+    int width, int height)
+{
+    if (!gradients.valid || gradients.queue.empty()) {
+        std::cout << "No gradient data to apply.\n";
+        return;
+    }
+
+    auto cpMap = buildChangePointMap(gradients.changePoints);
+
+    // Track which queue index was first assigned to each cluster pair
+    std::map<std::pair<int,int>, uint32_t> boundaryFirstIdx;
+    uint32_t nextQueueIdx = 0;
+
+    // We scan in the same order as the encoder (top→bottom, left→right)
+    // to reproduce the same queue assignment.
+    std::map<std::pair<int,int>, bool> seen;
+
+    for (int y = 0; y < height && nextQueueIdx < gradients.queue.size(); y++) {
+        for (int x = 0; x < width && nextQueueIdx < gradients.queue.size(); x++) {
+            int cA = indexMatrix[y * width + x];
+
+            // Check right neighbor
+            if (x + 1 < width) {
+                int cB = indexMatrix[y * width + (x + 1)];
+                if (cA != cB) {
+                    auto key = std::make_pair(std::min(cA, cB), std::max(cA, cB));
+                    if (!seen.count(key)) {
+                        seen[key] = true;
+                        boundaryFirstIdx[key] = nextQueueIdx++;
+                    }
+                }
+            }
+
+            // Check bottom neighbor
+            if (y + 1 < height) {
+                int cB = indexMatrix[(y + 1) * width + x];
+                if (cA != cB) {
+                    auto key = std::make_pair(std::min(cA, cB), std::max(cA, cB));
+                    if (!seen.count(key)) {
+                        seen[key] = true;
+                        boundaryFirstIdx[key] = nextQueueIdx++;
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Apply gradient blending at each boundary pixel ────────────────────────
+    // For each pixel, check all 4 neighbors. If the neighbor belongs to a
+    // different cluster, blend the two cluster colors across the transition zone
+    // defined by the descriptor's width and shape.
+
+    // Work on a copy so reads and writes don't interfere
+    std::vector<LabF> output = labImage;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int cA = indexMatrix[y * width + x];
+            const PaletteEntry& pA = palette[cA];
+
+            // Collect all neighboring clusters and their descriptors
+            int neighbors[4][2] = {{x+1,y},{x-1,y},{x,y+1},{x,y-1}};
+            for (auto& nb : neighbors) {
+                int nx = nb[0], ny = nb[1];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+                int cB = indexMatrix[ny * width + nx];
+                if (cA == cB) continue;
+
+                auto key = std::make_pair(std::min(cA, cB), std::max(cA, cB));
+                uint32_t qIdx = activeQueueIdx(x, y, cpMap, boundaryFirstIdx, key);
+
+                if (qIdx >= gradients.queue.size()) continue;
+                const GradientDescriptor& desc = gradients.queue[qIdx];
+
+                int   halfW = widthPixels(desc.width);
+                const PaletteEntry& pB = palette[cB];
+
+                // For each pixel in the transition zone, compute blend factor t
+                // based on distance from the boundary along the gradient direction.
+                for (int d = -halfW; d <= halfW; d++) {
+                    int bx = x, by = y;
+
+                    // Move along the direction perpendicular to the boundary edge
+                    switch (desc.direction) {
+                        case 0: bx = x + d; break;             // horizontal
+                        case 1: by = y + d; break;             // vertical
+                        case 2: bx = x + d; by = y + d; break; // diag-left
+                        case 3: bx = x + d; by = y - d; break; // diag-right
+                    }
+
+                    if (bx < 0 || bx >= width || by < 0 || by >= height) continue;
+                    if (indexMatrix[by * width + bx] != cA &&
+                        indexMatrix[by * width + bx] != cB) continue;
+
+                    // t=0 → color A, t=1 → color B
+                    float t = (float)(d + halfW) / (float)(2 * halfW + 1);
+                    t = applyShape(t, desc.shape);
+
+                    LabF& px = output[by * width + bx];
+                    px.L = pA.L + t * (pB.L - pA.L);
+                    px.a = pA.a + t * (pB.a - pA.a);
+                    px.b = pA.b + t * (pB.b - pA.b);
+                }
+            }
+        }
+    }
+
+    labImage = output;
+    std::cout << "Gradients applied.\n";
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// main
+// ═════════════════════════════════════════════════════════════════════════════
 int main(int argc, char* argv[]) {
 
-    // ── File path ────────────────────────────────────────────────────────────
     std::string filePath = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\build\\output_claude.sif";
     if (argc > 1) filePath = argv[1];
 
-    // ── Optional: custom seed from command line (./decoder file.sif 42) ──────
-    uint32_t seed = 1234;  // default seed → always reproducible
-    if (argc > 2) seed = (uint32_t)std::stoul(argv[2]);
-
     std::cout << "Loading: " << filePath << "\n";
-    std::cout << "Random seed: " << seed << "\n";
 
     // ── Decode ───────────────────────────────────────────────────────────────
     SIFData data = loadSIF(filePath);
     if (!data.valid) {
-        std::cerr << "Failed to decode file.\n";
+        std::cerr << "Failed to decode SIF file.\n";
         return 1;
     }
 
-    // ── RNG — seeded for full reproducibility ────────────────────────────────
-    std::mt19937 rng(seed);
+    // ── Build flat Lab image from palette + index matrix ──────────────────────
+    std::vector<LabF> labImage(data.width * data.height);
+    for (int i = 0; i < data.width * data.height; i++) {
+        const PaletteEntry& p = data.palette[data.indexMatrix[i]];
+        labImage[i] = {p.L, p.a, p.b};
+    }
 
-    // ── Build RGB pixel buffer with Gaussian sphere sampling ─────────────────
+    // ── Apply gradients ───────────────────────────────────────────────────────
+    applyGradients(labImage, data.indexMatrix, data.palette,
+                   data.gradients, data.width, data.height);
+
+    // ── Convert Lab → RGB ─────────────────────────────────────────────────────
     std::vector<uint8_t> pixels;
     pixels.reserve(data.width * data.height * 3);
 
-    for (int y = 0; y < data.height; y++) {
-        for (int x = 0; x < data.width; x++) {
-            int idx = data.indexMatrix[y * data.width + x];
-            const PaletteEntry& p = data.palette[idx];
-
-            RGB rgb = sampleLabSphere(p, rng);
-            pixels.push_back(rgb.r);
-            pixels.push_back(rgb.g);
-            pixels.push_back(rgb.b);
-        }
+    for (int i = 0; i < data.width * data.height; i++) {
+        RGB rgb = labToRGB(labImage[i].L, labImage[i].a, labImage[i].b);
+        pixels.push_back(rgb.r);
+        pixels.push_back(rgb.g);
+        pixels.push_back(rgb.b);
     }
 
-    // ── Save as PNG ──────────────────────────────────────────────────────────
+    // ── Save PNG ──────────────────────────────────────────────────────────────
     std::string outPath = filePath + "_reconstructed.png";
-
-    int success = stbi_write_png(
-        outPath.c_str(),
-        data.width,
-        data.height,
-        3,
-        pixels.data(),
-        data.width * 3
-    );
-
-    if (success) {
-        std::cout << "\n[SUCCESS] Reconstructed image saved to:\n";
-        std::cout << "  " << outPath << "\n";
-    } else {
+    int success = stbi_write_png(outPath.c_str(),
+                                 data.width, data.height, 3,
+                                 pixels.data(), data.width * 3);
+    if (success)
+        std::cout << "\n[SUCCESS] Saved to: " << outPath << "\n";
+    else {
         std::cerr << "Failed to write PNG.\n";
         return 1;
     }

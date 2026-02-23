@@ -10,30 +10,79 @@
 #include <cmath>
 #include <filesystem>
 
-// ── Palette entry (mirrors the encoder's PaletteEntry) ──────────────────────
+// ── Palette entry ─────────────────────────────────────────────────────────────
 struct PaletteEntry {
     float L, a, b, error;
 };
 
-// ── Decoded SIF data ─────────────────────────────────────────────────────────
+// ── Gradient precision (mirrors GradientEncoder.hpp) ─────────────────────────
+enum class GradientPrecision : uint8_t {
+    BITS_2 = 2,
+    BITS_4 = 4,
+    BITS_6 = 6
+};
+
+// ── Gradient descriptor ───────────────────────────────────────────────────────
+struct GradientDescriptor {
+    uint8_t shape;      // 0=sharp, 1=linear, 2=ease-in/out, 3=S-curve
+    uint8_t direction;  // 0=horizontal, 1=vertical, 2=diag-left, 3=diag-right
+    uint8_t width;      // 0=1px, 1=3px, 2=6px, 3=12px
+
+    static GradientDescriptor unpack(uint8_t bits, GradientPrecision prec) {
+        GradientDescriptor d{0, 0, 0};
+        switch (prec) {
+            case GradientPrecision::BITS_2:
+                d.shape     = bits & 0x03;
+                break;
+            case GradientPrecision::BITS_4:
+                d.shape     = (bits >> 2) & 0x03;
+                d.direction = bits & 0x03;
+                break;
+            case GradientPrecision::BITS_6:
+            default:
+                d.shape     = (bits >> 4) & 0x03;
+                d.direction = (bits >> 2) & 0x03;
+                d.width     = bits & 0x03;
+                break;
+        }
+        return d;
+    }
+};
+
+// ── Change point ──────────────────────────────────────────────────────────────
+struct ChangePoint {
+    uint16_t x, y;
+    uint32_t queueIdx;  // index into the gradient queue where new descriptor lives
+};
+
+// ── Gradient data read from file ──────────────────────────────────────────────
+struct GradientData {
+    GradientPrecision              precision;
+    std::vector<GradientDescriptor> queue;        // decoded descriptors in order
+    std::vector<ChangePoint>        changePoints;
+    bool valid = false;
+};
+
+// ── Full decoded SIF data ─────────────────────────────────────────────────────
 struct SIFData {
     int width, height;
-    std::vector<PaletteEntry> palette;
-    std::vector<int> indexMatrix;   // one palette index per pixel
+    std::vector<PaletteEntry>  palette;
+    std::vector<int>           indexMatrix;
+    GradientData               gradients;
     bool valid = false;
 };
 
 
-// ── BitReader: mirrors the encoder's BitWriter ───────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// BitReader
+// ═════════════════════════════════════════════════════════════════════════════
 class BitReader {
     std::ifstream& in;
     uint8_t buffer   = 0;
-    int     bitCount = 0;   // how many bits are still valid in buffer
-
+    int     bitCount = 0;
 public:
     BitReader(std::ifstream& f) : in(f) {}
 
-    // Read `numBits` bits and return them as a uint32_t (MSB first, same as BitWriter)
     uint32_t read(int numBits) {
         uint32_t result = 0;
         for (int i = 0; i < numBits; i++) {
@@ -46,7 +95,6 @@ public:
                 buffer   = static_cast<uint8_t>(c);
                 bitCount = 8;
             }
-            // Pull the MSB out of the buffer
             result   = (result << 1) | ((buffer >> 7) & 1);
             buffer <<= 1;
             bitCount--;
@@ -56,14 +104,15 @@ public:
 };
 
 
-// ── Huffman tree node (for decoding) ────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// Huffman decode tree
+// ═════════════════════════════════════════════════════════════════════════════
 struct DecodeNode {
-    int  key   = -1;          // -1 → internal node, >= 0 → leaf (pair key)
+    int key = -1;
     DecodeNode* left  = nullptr;
     DecodeNode* right = nullptr;
 };
 
-// Insert one code into the decode tree
 static void insertCode(DecodeNode* root, uint32_t code, int len, int key) {
     DecodeNode* cur = root;
     for (int i = len - 1; i >= 0; --i) {
@@ -79,10 +128,9 @@ static void insertCode(DecodeNode* root, uint32_t code, int len, int key) {
     cur->key = key;
 }
 
-// Decode one symbol by walking the tree bit by bit
 static int decodeNext(DecodeNode* root, BitReader& br) {
     DecodeNode* cur = root;
-    while (cur->left || cur->right) {   // while not a leaf
+    while (cur->left || cur->right) {
         uint32_t bit = br.read(1);
         cur = bit ? cur->right : cur->left;
         if (!cur) {
@@ -93,7 +141,6 @@ static int decodeNext(DecodeNode* root, BitReader& br) {
     return cur->key;
 }
 
-// Free the decode tree
 static void freeTree(DecodeNode* node) {
     if (!node) return;
     freeTree(node->left);
@@ -102,7 +149,9 @@ static void freeTree(DecodeNode* node) {
 }
 
 
-// ── Main decode function ─────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// Main decode function
+// ═════════════════════════════════════════════════════════════════════════════
 SIFData loadSIF(const std::string& path) {
     SIFData result;
 
@@ -129,23 +178,20 @@ SIFData loadSIF(const std::string& path) {
         file.read((char*)&a, 1);
         file.read((char*)&b, 1);
         file.read((char*)&e, 1);
-        p.L     = (float)L;
-        p.a     = (float)a;
-        p.b     = (float)b;
-        p.error = (float)e;
+        p.L = (float)L; p.a = (float)a;
+        p.b = (float)b; p.error = (float)e;
     }
 
-    // ── 3. Metadata written by encoder ───────────────────────────────────────
+    // ── 3. Metadata ───────────────────────────────────────────────────────────
     uint8_t  bitsPerIndex = 0;
     uint32_t maxRun       = 0;
     file.read((char*)&bitsPerIndex, 1);
     file.read((char*)&maxRun,       4);
 
-    // ── 4. Huffman table ─────────────────────────────────────────────────────
+    // ── 4. Huffman table ──────────────────────────────────────────────────────
     uint16_t tableEntries = 0;
     file.read((char*)&tableEntries, 2);
 
-    // Build the decode tree from the stored table
     DecodeNode* root = new DecodeNode();
     for (int i = 0; i < tableEntries; i++) {
         int32_t  key  = 0;
@@ -157,11 +203,10 @@ SIFData loadSIF(const std::string& path) {
         insertCode(root, code, (int)len, key);
     }
 
-    // ── 5. RLE count ─────────────────────────────────────────────────────────
+    // ── 5. RLE count + bit stream ─────────────────────────────────────────────
     uint32_t rleCount = 0;
     file.read((char*)&rleCount, 4);
 
-    // ── 6. Decode bit stream ─────────────────────────────────────────────────
     BitReader br(file);
     result.indexMatrix.reserve(result.width * result.height);
 
@@ -169,7 +214,6 @@ SIFData loadSIF(const std::string& path) {
         int pairKey = decodeNext(root, br);
         if (pairKey < 0) break;
 
-        // Reverse of encoder's pairKey = value * (maxRun + 1) + (runLength - 1)
         int value     =  pairKey / (int)(maxRun + 1);
         int runLength = (pairKey % (int)(maxRun + 1)) + 1;
 
@@ -178,9 +222,8 @@ SIFData loadSIF(const std::string& path) {
     }
 
     freeTree(root);
-    file.close();
 
-    // Sanity check
+    // Sanity check on index matrix
     int expectedPixels = result.width * result.height;
     if ((int)result.indexMatrix.size() != expectedPixels) {
         std::cerr << "Warning: expected " << expectedPixels
@@ -188,6 +231,57 @@ SIFData loadSIF(const std::string& path) {
     } else {
         result.valid = true;
     }
+
+    // ── 6. Gradient section (optional — file may not have it) ─────────────────
+    // We check if there are bytes remaining before trying to read gradients.
+    // This keeps the decoder backward-compatible with files that have no gradient data.
+    {
+        // Peek: try to read the precision byte
+        uint8_t precByte = 0;
+        file.read((char*)&precByte, 1);
+
+        if (!file.fail() &&
+            (precByte == 2 || precByte == 4 || precByte == 6)) {
+
+            result.gradients.precision = (GradientPrecision)precByte;
+            int precBits = (int)result.gradients.precision;
+
+            // 6a. Queue
+            uint32_t queueSize = 0;
+            file.read((char*)&queueSize, 4);
+
+            BitReader brGrad(file);
+            result.gradients.queue.reserve(queueSize);
+            for (uint32_t i = 0; i < queueSize; i++) {
+                uint8_t packed = (uint8_t)brGrad.read(precBits);
+                result.gradients.queue.push_back(
+                    GradientDescriptor::unpack(packed, result.gradients.precision));
+            }
+
+            // 6b. Change points
+            uint32_t cpCount = 0;
+            file.read((char*)&cpCount, 4);
+            result.gradients.changePoints.reserve(cpCount);
+            for (uint32_t i = 0; i < cpCount; i++) {
+                ChangePoint cp;
+                file.read((char*)&cp.x,        2);
+                file.read((char*)&cp.y,        2);
+                file.read((char*)&cp.queueIdx, 4);
+                result.gradients.changePoints.push_back(cp);
+            }
+
+            result.gradients.valid = true;
+
+            std::cout << "Gradient data found:\n";
+            std::cout << "  Precision:     " << precBits << " bits\n";
+            std::cout << "  Queue entries: " << result.gradients.queue.size() << "\n";
+            std::cout << "  Change points: " << result.gradients.changePoints.size() << "\n";
+        } else {
+            std::cout << "No gradient data in file (older format).\n";
+        }
+    }
+
+    file.close();
 
     std::cout << "\n--- SIF Decode Complete ---\n";
     std::cout << "Resolution:   " << result.width << "x" << result.height << "\n";
