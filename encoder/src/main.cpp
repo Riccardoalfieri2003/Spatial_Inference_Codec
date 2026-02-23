@@ -30,7 +30,10 @@ int main(int argc, char* argv[]) {
               << " and Max Steps: " << maxStepsFromRoot << std::endl;
 
     // ... your image loading code ...
-    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
+    
+
     int width, height, channels;
     unsigned char* imgData = stbi_load(filename, &width, &height, &channels, 0);
 
@@ -161,7 +164,7 @@ int main(int argc, char* argv[]) {
         indexMatrix,
         imgLabFlat,
         width, height,
-        GradientPrecision::BITS_4,  // ← change this to BITS_2 or BITS_4 for simpler images
+        GradientPrecision::BITS_2,  // ← change this to BITS_2 or BITS_4 for simpler images
         5.0f                        // ← change threshold: lower = more change points detected
     );
 

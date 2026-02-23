@@ -356,6 +356,85 @@ static LabF sampleGaussian(const PaletteEntry& p,  // cluster centroid + error
 
 
 
+// ── Region-confined Gaussian blur ─────────────────────────────────────────────
+//
+// Standard box-blur approximation (3 passes), but a pixel only contributes
+// to the average if it belongs to the SAME cluster as the center pixel.
+// This keeps blur strictly within region boundaries.
+//
+static std::vector<uint8_t> blurWithinRegions(
+    const std::vector<uint8_t>& pixels,
+    const std::vector<int>&     indexMatrix,
+    int width, int height,
+    int radius = 1)             // 1 = subtle, 2 = moderate, 3 = strong
+{
+    std::vector<uint8_t> current = pixels;
+
+    for (int pass = 0; pass < 3; pass++) {
+        std::vector<uint8_t> temp(current.size());
+
+        // ── Horizontal pass ───────────────────────────────────────────────────
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int centerCluster = indexMatrix[y * width + x];
+                float rSum = 0, gSum = 0, bSum = 0;
+                int count = 0;
+
+                for (int dx = -radius; dx <= radius; dx++) {
+                    int nx = x + dx;
+                    if (nx < 0 || nx >= width) continue;
+
+                    // Only include pixels from the same region
+                    if (indexMatrix[y * width + nx] != centerCluster) continue;
+
+                    int base = (y * width + nx) * 3;
+                    rSum += current[base + 0];
+                    gSum += current[base + 1];
+                    bSum += current[base + 2];
+                    count++;
+                }
+
+                int base = (y * width + x) * 3;
+                temp[base + 0] = (uint8_t)(rSum / count);
+                temp[base + 1] = (uint8_t)(gSum / count);
+                temp[base + 2] = (uint8_t)(bSum / count);
+            }
+        }
+
+        // ── Vertical pass ─────────────────────────────────────────────────────
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int centerCluster = indexMatrix[y * width + x];
+                float rSum = 0, gSum = 0, bSum = 0;
+                int count = 0;
+
+                for (int dy = -radius; dy <= radius; dy++) {
+                    int ny = y + dy;
+                    if (ny < 0 || ny >= height) continue;
+
+                    // Only include pixels from the same region
+                    if (indexMatrix[ny * width + x] != centerCluster) continue;
+
+                    int base = (ny * width + x) * 3;
+                    rSum += temp[base + 0];
+                    gSum += temp[base + 1];
+                    bSum += temp[base + 2];
+                    count++;
+                }
+
+                int base = (y * width + x) * 3;
+                current[base + 0] = (uint8_t)(rSum / count);
+                current[base + 1] = (uint8_t)(gSum / count);
+                current[base + 2] = (uint8_t)(bSum / count);
+            }
+        }
+    }
+
+    return current;
+}
+
+
+
 // ═════════════════════════════════════════════════════════════════════════════
 // main
 // ═════════════════════════════════════════════════════════════════════════════
@@ -421,6 +500,11 @@ int main(int argc, char* argv[]) {
         pixels.push_back(rgb.g);
         pixels.push_back(rgb.b);
     }
+
+    // ── Region-confined blur ──────────────────────────────────────────────────
+    int blurRadius = 1;  // tune: 1 = subtle, 2 = noticeable, 3 = strong
+    pixels = blurWithinRegions(pixels, data.indexMatrix, data.width, data.height, blurRadius);
+
 
     // ── Save PNG ──────────────────────────────────────────────────────────────
     std::string outPath = filePath + "_reconstructed.png";
