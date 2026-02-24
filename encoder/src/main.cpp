@@ -5,6 +5,7 @@
 #include "Cluster.hpp"
 #include "FileHandler.hpp"
 #include "GradientEncoder.hpp"
+#include "ResidualEncoder.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h" // Note: CMake handles the path now!
@@ -30,8 +31,8 @@ int main(int argc, char* argv[]) {
               << " and Max Steps: " << maxStepsFromRoot << std::endl;
 
     // ... your image loading code ...
-    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
-    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
     
 
     int width, height, channels;
@@ -146,7 +147,7 @@ int main(int argc, char* argv[]) {
     std::cout << "\nReady for file serialization!" << std::endl;
 
 
-        // ── Build flat Lab array (needed by gradient encoder) ────────────────────
+    // ── Build flat Lab array (needed by gradient encoder) ────────────────────
     std::vector<LabPixelFlat> imgLabFlat(width * height);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
@@ -168,8 +169,62 @@ int main(int argc, char* argv[]) {
         5.0f                        // ← change threshold: lower = more change points detected
     );
 
+
+
+    
+
+    // ── Build interleaved flat Lab arrays ────────────────────────────────────────
+    // originalLab:   the real Lab value of every pixel
+    // quantizedLab:  the palette centroid Lab value assigned to every pixel
+    std::vector<float> originalLab(width * height * 3);
+    std::vector<float> quantizedLab(width * height * 3);
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            int pixelOffset = (y * width + x) * channels;
+            int idx = y * width + x;
+
+            // Original pixel in Lab
+            LabPixel lab = ImageConverter::convertPixelRGBtoLab(
+                imgData[pixelOffset], imgData[pixelOffset+1], imgData[pixelOffset+2]);
+            originalLab[idx * 3 + 0] = lab.L;
+            originalLab[idx * 3 + 1] = lab.a;
+            originalLab[idx * 3 + 2] = lab.b;
+
+            // Quantized: just the palette centroid for this pixel's cluster
+            int clusterIdx = indexMatrix[idx];
+            quantizedLab[idx * 3 + 0] = palette[clusterIdx].L;
+            quantizedLab[idx * 3 + 1] = palette[clusterIdx].a;
+            quantizedLab[idx * 3 + 2] = palette[clusterIdx].b;
+        }
+    }
+
+    // ── Configure and run residual encoder ───────────────────────────────────────
+    // Tune these three parameters to trade file size vs. gradient quality:
+    //
+    //   blockSize  8  → standard, good for most images
+    //              16 → smoother residual, fewer block artifacts
+    //
+    //   keepCoeffs 3  → DC + 2 AC terms, very lightweight, only broadest gradients
+    //              6  → good default, recovers most subtle gradients
+    //              10 → more detail, larger file
+    //
+    //   quantStep  1.0 → fine quantization, more precision
+    //              2.0 → good default balance
+    //              4.0 → coarse, smallest file, visible banding on strong gradients
+    //
+    ResidualConfig rConfig;
+    rConfig.blockSize  = 8;
+    rConfig.keepCoeffs = 6;
+    rConfig.quantStep  = 2.0f;
+
+    ResidualData residual = encodeResidual(originalLab, quantizedLab,
+                                            width, height, rConfig);
+
+
+
     // ── Save ─────────────────────────────────────────────────────────────────
-    saveSIF_claude("output_claude.sif", width, height, palette, indexMatrix, gradients);
+    saveSIF_claude("output_claude.sif", width, height, palette, indexMatrix, gradients, residual);
         
 
     stbi_image_free(imgData);

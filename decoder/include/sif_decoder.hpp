@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
+#include "ResidualEncoder.hpp"
 
 // ── Palette entry ─────────────────────────────────────────────────────────────
 struct PaletteEntry {
@@ -69,6 +70,7 @@ struct SIFData {
     std::vector<PaletteEntry>  palette;
     std::vector<int>           indexMatrix;
     GradientData               gradients;
+    ResidualData               residual;
     bool valid = false;
 };
 
@@ -280,6 +282,28 @@ SIFData loadSIF(const std::string& path) {
             std::cout << "No gradient data in file (older format).\n";
         }
     }
+
+    // ── 7. Residual section (optional) ───────────────────────────────────────
+    uint8_t residualMagic = 0;
+    file.read((char*)&residualMagic, 1);
+
+    if (!file.fail() && residualMagic == 0xDC) {
+        result.residual = readResidual(file, result.width, result.height);
+
+        if (result.residual.valid) {
+            std::cout << "Residual data found:\n";
+            std::cout << "  Block size:    " << result.residual.config.blockSize << "x"
+                                                << result.residual.config.blockSize << "\n";
+            std::cout << "  Coeffs kept:   " << result.residual.config.keepCoeffs << "\n";
+            std::cout << "  Quant step:    " << result.residual.config.quantStep << "\n";
+            std::cout << "  Total coeffs:  " << result.residual.coefficients.size() << "\n";
+        }
+    } else {
+        std::cout << "No residual data in file.\n";
+    }
+
+
+    file.close();
 
     file.close();
 

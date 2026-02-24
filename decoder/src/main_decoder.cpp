@@ -5,6 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include "sif_decoder.hpp"
+#include "ResidualEncoder.hpp"   // applyResidual()
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -463,36 +464,51 @@ int main(int argc, char* argv[]) {
     applyGradients(labImage, data.indexMatrix, data.palette,
                    data.gradients, data.width, data.height);
 
+
+
+    // ── 4. Apply DCT residual ─────────────────────────────────────────────────
+    // Convert LabF array to interleaved float array that applyResidual expects
+    std::vector<float> labFlat(data.width * data.height * 3);
+    for (int i = 0; i < data.width * data.height; i++) {
+        labFlat[i*3+0] = labImage[i].L;
+        labFlat[i*3+1] = labImage[i].a;
+        labFlat[i*3+2] = labImage[i].b;
+    }
+
+    applyResidual(labFlat, data.residual, data.width, data.height);
+
+    // Write back into LabF image after residual correction
+    for (int i = 0; i < data.width * data.height; i++) {
+        labImage[i] = {labFlat[i*3+0], labFlat[i*3+1], labFlat[i*3+2]};
+    }
+
+
+
     // ── Convert Lab → RGB ─────────────────────────────────────────────────────
     std::vector<uint8_t> pixels;
     pixels.reserve(data.width * data.height * 3);
 
-    // ── Choose sampling mode ──────────────────────────────────────────────────
-    // 0 = no noise (pure gradient), 1 = uniform, 2 = gaussian
+    bool addNoise = false;
     int noiseMode = 2;
-    float gaussBias = 0.6f;  // only used in mode 2
-
+    float gaussBias = 0.6f;
     uint32_t seed = 1234;
     if (argc > 2) seed = (uint32_t)std::stoul(argv[2]);
     std::mt19937 rng(seed);
-    std::cout << "Noise seed: " << seed << "\n";
+
 
     for (int i = 0; i < data.width * data.height; i++) {
         const PaletteEntry& p = data.palette[data.indexMatrix[i]];
-        LabF gradColor = labImage[i];  // already has gradient applied
+        LabF gradColor = labImage[i];
 
-        LabF finalColor;
-        switch (noiseMode) {
-            case 0:
-                finalColor = gradColor;
-                break;
-            case 1:
-                finalColor = sampleUniform(p, gradColor, rng);
-                break;
-            case 2:
-            default:
-                finalColor = sampleGaussian(p, gradColor, rng, gaussBias);
-                break;
+        // Always assign finalColor — noise is optional, RGB conversion is not
+        LabF finalColor = gradColor;
+
+        if (addNoise) {
+            switch (noiseMode) {
+                case 1:  finalColor = sampleUniform(p, gradColor, rng); break;
+                case 2:
+                default: finalColor = sampleGaussian(p, gradColor, rng, gaussBias); break;
+            }
         }
 
         RGB rgb = labToRGB(finalColor.L, finalColor.a, finalColor.b);
@@ -500,6 +516,7 @@ int main(int argc, char* argv[]) {
         pixels.push_back(rgb.g);
         pixels.push_back(rgb.b);
     }
+
 
     // ── Region-confined blur ──────────────────────────────────────────────────
     int blurRadius = 1;  // tune: 1 = subtle, 2 = noticeable, 3 = strong
