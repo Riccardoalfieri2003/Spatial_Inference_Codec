@@ -239,7 +239,8 @@ ResidualData encodeResidual(
 void applyResidual(
     std::vector<float>& labImage,
     const ResidualData& residual,
-    int width, int height)
+    int width, int height,
+    float strength = 0.25f)  // 0.0 = no effect, 1.0 = full correction, 0.25 = gentle guide
 {
     if (!residual.valid || residual.coefficients.empty()) {
         std::cout << "No residual data to apply.\n";
@@ -259,20 +260,26 @@ void applyResidual(
         for (int by = 0; by < blocksY; by++) {
             for (int bx = 0; bx < blocksX; bx++) {
 
-                // ── Reconstruct DCT block from stored coefficients ─────────────
+                // Reconstruct the residual block via IDCT
                 std::vector<float> block(N * N, 0.0f);
-
                 for (int k = 0; k < keep && coeffIdx < (int)residual.coefficients.size(); k++) {
                     auto [r, c] = zigzag[k];
-                    float coeff = residual.coefficients[coeffIdx++] * residual.config.quantStep;
-                    block[r * N + c] = coeff;
-                    // All other positions remain 0 (high-freq zeroed out)
+                    block[r * N + c] = residual.coefficients[coeffIdx++]
+                                     * residual.config.quantStep;
                 }
-
-                // ── Apply inverse DCT ─────────────────────────────────────────
                 idct2d(block, N);
 
-                // ── Add residual back to image ────────────────────────────────
+                // Compute the magnitude of change in this block
+                // If the residual is small, it means flat region → apply very little
+                // If the residual is large, it means gradient area → apply more
+                float maxMag = 0.0f;
+                for (float v : block) maxMag = std::max(maxMag, std::abs(v));
+
+                // Normalize strength by block magnitude so flat regions are untouched
+                // and gradient regions get gently guided
+                float blockStrength = strength * std::min(maxMag / 10.0f, 1.0f);
+
+                // Apply scaled residual back to image
                 for (int r = 0; r < N; r++) {
                     for (int c = 0; c < N; c++) {
                         int px = bx * N + c;
@@ -280,17 +287,15 @@ void applyResidual(
                         if (px >= width || py >= height) continue;
 
                         int idx = py * width + px;
-                        labImage[idx * 3 + ch] += block[r * N + c];
+                        labImage[idx * 3 + ch] += block[r * N + c] * blockStrength;
                     }
                 }
             }
         }
     }
 
-    std::cout << "Residual applied (" << residual.coefficients.size()
-              << " coefficients).\n";
+    std::cout << "Residual guidance applied (strength=" << strength << ").\n";
 }
-
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Serialization helpers (called from saveSIF and loadSIF)

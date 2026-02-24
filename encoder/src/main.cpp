@@ -214,9 +214,9 @@ int main(int argc, char* argv[]) {
     //              4.0 → coarse, smallest file, visible banding on strong gradients
     //
     ResidualConfig rConfig;
-    rConfig.blockSize  = 8;
-    rConfig.keepCoeffs = 6;
-    rConfig.quantStep  = 2.0f;
+    rConfig.blockSize  = 16;
+    rConfig.keepCoeffs = 2;
+    rConfig.quantStep  = 8.0f;
 
     ResidualData residual = encodeResidual(originalLab, quantizedLab,
                                             width, height, rConfig);

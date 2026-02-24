@@ -436,6 +436,10 @@ static std::vector<uint8_t> blurWithinRegions(
 
 
 
+
+
+
+
 // ═════════════════════════════════════════════════════════════════════════════
 // main
 // ═════════════════════════════════════════════════════════════════════════════
@@ -475,7 +479,7 @@ int main(int argc, char* argv[]) {
         labFlat[i*3+2] = labImage[i].b;
     }
 
-    applyResidual(labFlat, data.residual, data.width, data.height);
+    applyResidual(labFlat, data.residual, data.width, data.height, 1.0f);
 
     // Write back into LabF image after residual correction
     for (int i = 0; i < data.width * data.height; i++) {
@@ -488,7 +492,7 @@ int main(int argc, char* argv[]) {
     std::vector<uint8_t> pixels;
     pixels.reserve(data.width * data.height * 3);
 
-    bool addNoise = false;
+    bool addNoise = true;
     int noiseMode = 2;
     float gaussBias = 0.6f;
     uint32_t seed = 1234;
