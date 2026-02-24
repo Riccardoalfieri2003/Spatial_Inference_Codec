@@ -437,7 +437,185 @@ static std::vector<uint8_t> blurWithinRegions(
 
 
 
+// ── Cross-region Gaussian blur on borders between similar-colored regions ─────
+//
+// For each pixel on a boundary between two regions:
+//   - Compute Lab distance between the two cluster centroids
+//   - If distance < similarityThreshold → regions are "similar" → blur the border
+//   - Blur radius pixels on each side of the boundary are blended
+//
+static std::vector<uint8_t> blurSimilarBorders(
+    const std::vector<uint8_t>&      pixels,
+    const std::vector<int>&          indexMatrix,
+    const std::vector<PaletteEntry>& palette,
+    int width, int height,
+    int   blurRadius         = 3,
+    float similarityThreshold = 10.0f)
+{
+    // Precompute which cluster pairs are "similar"
+    // Key: {minIdx, maxIdx} → true if similar enough to blur
+    std::map<std::pair<int,int>, bool> similarPairs;
 
+    auto labDist = [&](int cA, int cB) {
+        const PaletteEntry& a = palette[cA];
+        const PaletteEntry& b = palette[cB];
+        float dL = a.L - b.L;
+        float da = a.a - b.a;
+        float db = a.b - b.b;
+        return std::sqrt(dL*dL + da*da + db*db);
+    };
+
+    auto isSimilar = [&](int cA, int cB) -> bool {
+        auto key = std::make_pair(std::min(cA, cB), std::max(cA, cB));
+        auto it = similarPairs.find(key);
+        if (it != similarPairs.end()) return it->second;
+        bool result = labDist(cA, cB) < similarityThreshold;
+        similarPairs[key] = result;
+        return result;
+    };
+
+    // Build a mask of pixels that should be blurred
+    // A pixel is in the mask if it is within blurRadius of a similar-pair boundary
+    std::vector<bool> blurMask(width * height, false);
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int cA = indexMatrix[y * width + x];
+
+            int neighbors[4][2] = {{x+1,y},{x-1,y},{x,y+1},{x,y-1}};
+            for (auto& nb : neighbors) {
+                int nx = nb[0], ny = nb[1];
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                int cB = indexMatrix[ny * width + nx];
+                if (cA == cB) continue;
+
+                if (isSimilar(cA, cB)) {
+                    // Mark a radius around this boundary pixel
+                    for (int dy = -blurRadius; dy <= blurRadius; dy++) {
+                        for (int dx = -blurRadius; dx <= blurRadius; dx++) {
+                            int mx = x + dx, my = y + dy;
+                            if (mx >= 0 && mx < width && my >= 0 && my < height)
+                                blurMask[my * width + mx] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Gaussian weights for a kernel of size (2*blurRadius+1)
+    // Using a simple approximation: weight = exp(-d² / (2*sigma²))
+    float sigma = blurRadius / 2.0f;
+    int   kSize = 2 * blurRadius + 1;
+    std::vector<float> kernel(kSize * kSize);
+    float kernelSum = 0.0f;
+    for (int ky = 0; ky < kSize; ky++) {
+        for (int kx = 0; kx < kSize; kx++) {
+            float dx = kx - blurRadius;
+            float dy = ky - blurRadius;
+            float w  = std::exp(-(dx*dx + dy*dy) / (2.0f * sigma * sigma));
+            kernel[ky * kSize + kx] = w;
+            kernelSum += w;
+        }
+    }
+    // Normalize
+    for (float& w : kernel) w /= kernelSum;
+
+    // Apply blur only to masked pixels
+    std::vector<uint8_t> output = pixels;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            if (!blurMask[y * width + x]) continue;
+
+            float rSum = 0, gSum = 0, bSum = 0, wSum = 0;
+
+            for (int ky = 0; ky < kSize; ky++) {
+                for (int kx = 0; kx < kSize; kx++) {
+                    int nx = x + kx - blurRadius;
+                    int ny = y + ky - blurRadius;
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+
+                    float w = kernel[ky * kSize + kx];
+                    int base = (ny * width + nx) * 3;
+                    rSum += pixels[base + 0] * w;
+                    gSum += pixels[base + 1] * w;
+                    bSum += pixels[base + 2] * w;
+                    wSum += w;
+                }
+            }
+
+            int base = (y * width + x) * 3;
+            output[base + 0] = (uint8_t)std::clamp(rSum / wSum, 0.0f, 255.0f);
+            output[base + 1] = (uint8_t)std::clamp(gSum / wSum, 0.0f, 255.0f);
+            output[base + 2] = (uint8_t)std::clamp(bSum / wSum, 0.0f, 255.0f);
+        }
+    }
+
+    return output;
+}
+
+// ── Global soft low-pass filter to reduce sharpening artifacts ───────────────
+// Applies a gentle Gaussian blur to the ENTIRE image (no region constraints).
+// strength: 0.0 = no effect, 1.0 = full blur output
+//           use 0.3-0.5 for subtle softening
+static std::vector<uint8_t> softLowPass(
+    const std::vector<uint8_t>& pixels,
+    int width, int height,
+    int   radius   = 1,      // kernel radius: 1 = 3x3, 2 = 5x5
+    float strength = 0.4f)   // blend factor: original*(1-strength) + blurred*strength
+{
+    float sigma = radius * 0.75f;
+    int   kSize = 2 * radius + 1;
+
+    // Build Gaussian kernel
+    std::vector<float> kernel(kSize * kSize);
+    float kSum = 0.0f;
+    for (int ky = 0; ky < kSize; ky++) {
+        for (int kx = 0; kx < kSize; kx++) {
+            float dx = kx - radius, dy = ky - radius;
+            float w = std::exp(-(dx*dx + dy*dy) / (2.0f * sigma * sigma));
+            kernel[ky * kSize + kx] = w;
+            kSum += w;
+        }
+    }
+    for (float& w : kernel) w /= kSum;
+
+    // Apply kernel to every pixel
+    std::vector<uint8_t> blurred(pixels.size());
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            float rS = 0, gS = 0, bS = 0, wS = 0;
+            for (int ky = 0; ky < kSize; ky++) {
+                for (int kx = 0; kx < kSize; kx++) {
+                    int nx = x + kx - radius;
+                    int ny = y + ky - radius;
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                    float w = kernel[ky * kSize + kx];
+                    int base = (ny * width + nx) * 3;
+                    rS += pixels[base + 0] * w;
+                    gS += pixels[base + 1] * w;
+                    bS += pixels[base + 2] * w;
+                    wS += w;
+                }
+            }
+            int base = (y * width + x) * 3;
+            blurred[base + 0] = (uint8_t)(rS / wS);
+            blurred[base + 1] = (uint8_t)(gS / wS);
+            blurred[base + 2] = (uint8_t)(bS / wS);
+        }
+    }
+
+    // Blend original and blurred by strength factor
+    // This lets you dial in exactly how much softening you want
+    std::vector<uint8_t> output(pixels.size());
+    for (int i = 0; i < (int)pixels.size(); i++) {
+        float blended = pixels[i] * (1.0f - strength) + blurred[i] * strength;
+        output[i] = (uint8_t)std::clamp(blended, 0.0f, 255.0f);
+    }
+
+    return output;
+}
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -523,9 +701,17 @@ int main(int argc, char* argv[]) {
 
 
     // ── Region-confined blur ──────────────────────────────────────────────────
-    int blurRadius = 1;  // tune: 1 = subtle, 2 = noticeable, 3 = strong
+    int blurRadius = 2;  // tune: 1 = subtle, 2 = noticeable, 3 = strong
     pixels = blurWithinRegions(pixels, data.indexMatrix, data.width, data.height, blurRadius);
 
+    
+    //pixels = blurSimilarBorders(pixels, data.indexMatrix, data.palette,data.width, data.height, 3, 4.0f );
+
+
+    // ── Global softening to reduce sharpening artifacts ───────────────────────
+    pixels = softLowPass(pixels, data.width, data.height,
+                        2,      // radius: 1 = very gentle, 2 = more noticeable
+                        0.4f);  // strength: 0.3 = subtle, 0.5 = clearly softer
 
     // ── Save PNG ──────────────────────────────────────────────────────────────
     std::string outPath = filePath + "_reconstructed.png";

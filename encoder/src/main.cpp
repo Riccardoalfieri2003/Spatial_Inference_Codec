@@ -165,8 +165,9 @@ int main(int argc, char* argv[]) {
         indexMatrix,
         imgLabFlat,
         width, height,
-        GradientPrecision::BITS_2,  // ← change this to BITS_2 or BITS_4 for simpler images
-        5.0f                        // ← change threshold: lower = more change points detected
+        GradientPrecision::BITS_4,
+        0.25f,   // changeThreshold — lower = more sensitive to gradient changes
+        16       // segmentSize — smaller = more frequent updates along boundaries
     );
 
 
