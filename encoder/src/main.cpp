@@ -31,8 +31,8 @@ int main(int argc, char* argv[]) {
               << " and Max Steps: " << maxStepsFromRoot << std::endl;
 
     // ... your image loading code ...
-    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
-    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
+    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
     
 
     int width, height, channels;
@@ -166,8 +166,8 @@ int main(int argc, char* argv[]) {
         imgLabFlat,
         width, height,
         GradientPrecision::BITS_4,
-        0.25f,   // changeThreshold — lower = more sensitive to gradient changes
-        16       // segmentSize — smaller = more frequent updates along boundaries
+        1.0f,   // changeThreshold — lower = more sensitive to gradient changes
+        64       // segmentSize — smaller = more frequent updates along boundaries
     );
 
 
@@ -216,13 +216,12 @@ int main(int argc, char* argv[]) {
     //
     ResidualConfig rConfig;
     rConfig.blockSize  = 16;
-    rConfig.keepCoeffs = 2;
-    rConfig.quantStep  = 8.0f;
+    rConfig.keepCoeffs = 1;
+    rConfig.quantStep  = 16.0f;
 
-    ResidualData residual = encodeResidual(originalLab, quantizedLab,
-                                            width, height, rConfig);
+    ResidualData residual = encodeResidual(originalLab, quantizedLab, width, height, rConfig);
 
-
+    
 
     // ── Save ─────────────────────────────────────────────────────────────────
     saveSIF_claude("output_claude.sif", width, height, palette, indexMatrix, gradients, residual);

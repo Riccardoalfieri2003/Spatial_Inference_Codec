@@ -618,6 +618,178 @@ static std::vector<uint8_t> softLowPass(
 }
 
 
+
+
+// ── DCT Deblocking Filter (improved) ─────────────────────────────────────────
+//
+// Three passes to fully eliminate visible block grid:
+//   Pass 1: Horizontal 1D boundary smoothing  (vertical block edges)
+//   Pass 2: Vertical   1D boundary smoothing  (horizontal block edges)
+//   Pass 3: 2D radial corner smoothing        (the intersections where 4 blocks
+//           meet — this is what the 1D passes leave behind as a visible grid)
+//
+// blendWidth : pixels on each side of boundary to affect (3-5 recommended)
+// threshold  : Lab jump above this = real edge, don't touch it
+//              Lab jump below this = DCT artifact, smooth it
+void deblockResidual(
+    std::vector<float>& labFlat,
+    int width, int height,
+    int   blockSize  = 8,
+    int   blendWidth = 3,
+    float threshold  = 8.0f)
+{
+    std::vector<float> output = labFlat;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+
+            // Which block does this pixel belong to?
+            int bx = x / blockSize;
+            int by = y / blockSize;
+
+            // Position within the block (0 = left/top edge, blockSize-1 = right/bottom edge)
+            int localX = x % blockSize;
+            int localY = y % blockSize;
+
+            // Distance from each of the 4 block edges
+            int distLeft   = localX;
+            int distRight  = blockSize - 1 - localX;
+            int distTop    = localY;
+            int distBottom = blockSize - 1 - localY;
+
+            int minDist = std::min({distLeft, distRight, distTop, distBottom});
+
+            // Only pixels within blendWidth of ANY edge participate in blending
+            if (minDist >= blendWidth) continue;
+
+            // Gather neighboring block centers to blend with
+            // For each neighbor, compute a weight based on proximity
+            struct Neighbor { float L, a, b; float weight; };
+            std::vector<Neighbor> neighbors;
+
+            // Helper: sample the CENTER of a block at block coords (nbx, nby)
+            auto sampleBlockCenter = [&](int nbx, int nby) -> std::tuple<float,float,float,bool> {
+                if (nbx < 0 || nby < 0 ||
+                    nbx >= (width+blockSize-1)/blockSize ||
+                    nby >= (height+blockSize-1)/blockSize)
+                    return {0,0,0,false};
+
+                int cx = std::min(nbx * blockSize + blockSize/2, width-1);
+                int cy = std::min(nby * blockSize + blockSize/2, height-1);
+                int idx = (cy * width + cx) * 3;
+                return {labFlat[idx], labFlat[idx+1], labFlat[idx+2], true};
+            };
+
+            // Left neighbor
+            if (distLeft < blendWidth) {
+                auto [L,a,b,ok] = sampleBlockCenter(bx-1, by);
+                if (ok) {
+                    // Check if this is a real edge or a DCT artifact
+                    int edgeX = bx * blockSize;
+                    float jumpL = 0, jumpA = 0, jumpB = 0;
+                    if (edgeX > 0 && edgeX < width) {
+                        jumpL = std::abs(labFlat[(y*width+edgeX)*3+0] - labFlat[(y*width+edgeX-1)*3+0]);
+                        jumpA = std::abs(labFlat[(y*width+edgeX)*3+1] - labFlat[(y*width+edgeX-1)*3+1]);
+                        jumpB = std::abs(labFlat[(y*width+edgeX)*3+2] - labFlat[(y*width+edgeX-1)*3+2]);
+                    }
+                    float jump = std::sqrt(jumpL*jumpL + jumpA*jumpA + jumpB*jumpB);
+                    if (jump < threshold) {
+                        // Weight: stronger the closer we are to that edge
+                        float w = (float)(blendWidth - distLeft) / blendWidth;
+                        w = w * w * (3.0f - 2.0f * w);  // smoothstep
+                        w *= (1.0f - jump / threshold);   // reduce if real-ish edge
+                        neighbors.push_back({L, a, b, w});
+                    }
+                }
+            }
+
+            // Right neighbor
+            if (distRight < blendWidth) {
+                auto [L,a,b,ok] = sampleBlockCenter(bx+1, by);
+                if (ok) {
+                    int edgeX = (bx+1) * blockSize;
+                    float jumpL = 0, jumpA = 0, jumpB = 0;
+                    if (edgeX > 0 && edgeX < width) {
+                        jumpL = std::abs(labFlat[(y*width+edgeX)*3+0] - labFlat[(y*width+edgeX-1)*3+0]);
+                        jumpA = std::abs(labFlat[(y*width+edgeX)*3+1] - labFlat[(y*width+edgeX-1)*3+1]);
+                        jumpB = std::abs(labFlat[(y*width+edgeX)*3+2] - labFlat[(y*width+edgeX-1)*3+2]);
+                    }
+                    float jump = std::sqrt(jumpL*jumpL + jumpA*jumpA + jumpB*jumpB);
+                    if (jump < threshold) {
+                        float w = (float)(blendWidth - distRight) / blendWidth;
+                        w = w * w * (3.0f - 2.0f * w);
+                        w *= (1.0f - jump / threshold);
+                        neighbors.push_back({L, a, b, w});
+                    }
+                }
+            }
+
+            // Top neighbor
+            if (distTop < blendWidth) {
+                auto [L,a,b,ok] = sampleBlockCenter(bx, by-1);
+                if (ok) {
+                    int edgeY = by * blockSize;
+                    float jumpL = 0, jumpA = 0, jumpB = 0;
+                    if (edgeY > 0 && edgeY < height) {
+                        jumpL = std::abs(labFlat[(edgeY*width+x)*3+0] - labFlat[((edgeY-1)*width+x)*3+0]);
+                        jumpA = std::abs(labFlat[(edgeY*width+x)*3+1] - labFlat[((edgeY-1)*width+x)*3+1]);
+                        jumpB = std::abs(labFlat[(edgeY*width+x)*3+2] - labFlat[((edgeY-1)*width+x)*3+2]);
+                    }
+                    float jump = std::sqrt(jumpL*jumpL + jumpA*jumpA + jumpB*jumpB);
+                    if (jump < threshold) {
+                        float w = (float)(blendWidth - distTop) / blendWidth;
+                        w = w * w * (3.0f - 2.0f * w);
+                        w *= (1.0f - jump / threshold);
+                        neighbors.push_back({L, a, b, w});
+                    }
+                }
+            }
+
+            // Bottom neighbor
+            if (distBottom < blendWidth) {
+                auto [L,a,b,ok] = sampleBlockCenter(bx, by+1);
+                if (ok) {
+                    int edgeY = (by+1) * blockSize;
+                    float jumpL = 0, jumpA = 0, jumpB = 0;
+                    if (edgeY > 0 && edgeY < height) {
+                        jumpL = std::abs(labFlat[(edgeY*width+x)*3+0] - labFlat[((edgeY-1)*width+x)*3+0]);
+                        jumpA = std::abs(labFlat[(edgeY*width+x)*3+1] - labFlat[((edgeY-1)*width+x)*3+1]);
+                        jumpB = std::abs(labFlat[(edgeY*width+x)*3+2] - labFlat[((edgeY-1)*width+x)*3+2]);
+                    }
+                    float jump = std::sqrt(jumpL*jumpL + jumpA*jumpA + jumpB*jumpB);
+                    if (jump < threshold) {
+                        float w = (float)(blendWidth - distBottom) / blendWidth;
+                        w = w * w * (3.0f - 2.0f * w);
+                        w *= (1.0f - jump / threshold);
+                        neighbors.push_back({L, a, b, w});
+                    }
+                }
+            }
+
+            if (neighbors.empty()) continue;
+
+            // Blend this pixel with all contributing neighbors
+            // The pixel itself has weight 1.0, neighbors contribute based on proximity
+            for (int ch = 0; ch < 3; ch++) {
+                float self = labFlat[(y * width + x) * 3 + ch];
+                float blended = self;
+                float totalW  = 0;
+
+                for (auto& nb : neighbors) {
+                    float nbVal = ch==0 ? nb.L : ch==1 ? nb.a : nb.b;
+                    blended += nb.weight * nbVal;
+                    totalW  += nb.weight;
+                }
+
+                // Normalize: self always has implicit weight 1.0
+                output[(y * width + x) * 3 + ch] = blended / (1.0f + totalW);
+            }
+        }
+    }
+
+    labFlat = output;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // main
 // ═════════════════════════════════════════════════════════════════════════════
@@ -642,10 +814,7 @@ int main(int argc, char* argv[]) {
         labImage[i] = {p.L, p.a, p.b};
     }
 
-    // ── Apply gradients ───────────────────────────────────────────────────────
-    applyGradients(labImage, data.indexMatrix, data.palette,
-                   data.gradients, data.width, data.height);
-
+    
 
 
     // ── 4. Apply DCT residual ─────────────────────────────────────────────────
@@ -657,7 +826,28 @@ int main(int argc, char* argv[]) {
         labFlat[i*3+2] = labImage[i].b;
     }
 
-    applyResidual(labFlat, data.residual, data.width, data.height, 1.0f);
+    applyResidual(labFlat, data.residual, data.width, data.height, 2.5f);
+
+    // ── Deblock DCT artifacts ─────────────────────────────────────────────────
+    deblockResidual(labFlat, data.width, data.height,
+                    data.residual.config.blockSize,  // match the encoder's block size
+                    8,      // blendWidth: 2 = subtle, 3 = standard, 4 = aggressive
+                    2048.0f);  // threshold: below this = DCT artifact, above = real edge
+
+    deblockResidual(labFlat, data.width, data.height,
+                    data.residual.config.blockSize/2,  // match the encoder's block size
+                    8,      // blendWidth: 2 = subtle, 3 = standard, 4 = aggressive
+                    2048.0f);  // threshold: below this = DCT artifact, above = real edge
+
+    // Write back into LabF image
+    for (int i = 0; i < data.width * data.height; i++) {
+        labImage[i] = {labFlat[i*3+0], labFlat[i*3+1], labFlat[i*3+2]};
+    }
+
+    // ── Apply gradients ───────────────────────────────────────────────────────
+    applyGradients(labImage, data.indexMatrix, data.palette,
+                   data.gradients, data.width, data.height);
+
 
     // Write back into LabF image after residual correction
     for (int i = 0; i < data.width * data.height; i++) {
@@ -667,11 +857,12 @@ int main(int argc, char* argv[]) {
 
 
     // ── Convert Lab → RGB ─────────────────────────────────────────────────────
+    // Modificare. Siccome molto costoso, semplicemente collassa i colori esterni ai volumi (e anche su quelli interni) con proabilità
     std::vector<uint8_t> pixels;
     pixels.reserve(data.width * data.height * 3);
 
     bool addNoise = true;
-    int noiseMode = 2;
+    int noiseMode = 1;
     float gaussBias = 0.6f;
     uint32_t seed = 1234;
     if (argc > 2) seed = (uint32_t)std::stoul(argv[2]);
@@ -701,17 +892,26 @@ int main(int argc, char* argv[]) {
 
 
     // ── Region-confined blur ──────────────────────────────────────────────────
-    int blurRadius = 2;  // tune: 1 = subtle, 2 = noticeable, 3 = strong
-    pixels = blurWithinRegions(pixels, data.indexMatrix, data.width, data.height, blurRadius);
-
+    bool addInternalBlur=false;
+    if (addInternalBlur){
+        int blurRadius = 2;  // tune: 1 = subtle, 2 = noticeable, 3 = strong
+        pixels = blurWithinRegions(pixels, data.indexMatrix, data.width, data.height, blurRadius);
+    }
     
-    //pixels = blurSimilarBorders(pixels, data.indexMatrix, data.palette,data.width, data.height, 3, 4.0f );
+    bool similarBordersBlur=false;
+    if (similarBordersBlur){
+        pixels = blurSimilarBorders(pixels, data.indexMatrix, data.palette,data.width, data.height, 3, 4.0f );
+    }
+    
 
-
-    // ── Global softening to reduce sharpening artifacts ───────────────────────
-    pixels = softLowPass(pixels, data.width, data.height,
-                        2,      // radius: 1 = very gentle, 2 = more noticeable
-                        0.4f);  // strength: 0.3 = subtle, 0.5 = clearly softer
+    bool addsoftLowPass=false;
+    if (addsoftLowPass){
+        // ── Global softening to reduce sharpening artifacts ───────────────────────
+        pixels = softLowPass(pixels, data.width, data.height,
+                            2,      // radius: 1 = very gentle, 2 = more noticeable
+                            0.3f);  // strength: 0.3 = subtle, 0.5 = clearly softer
+    
+    }
 
     // ── Save PNG ──────────────────────────────────────────────────────────────
     std::string outPath = filePath + "_reconstructed.png";
