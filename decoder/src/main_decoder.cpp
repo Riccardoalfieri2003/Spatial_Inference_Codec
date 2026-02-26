@@ -266,14 +266,64 @@ static LabF clampToSphere(float centerL, float centerA, float centerB,
 }
 
 
-// ── Version 1: Uniform sampling between gradient color and centroid ───────────
+// ── Check if a pixel is within `borderDist` pixels of a cluster boundary ──────
+static bool nearBoundary(int i, int width, int height,
+                          const std::vector<int>& indexMatrix,
+                          int borderDist = 3) {
+    int x = i % width;
+    int y = i / width;
+    int c = indexMatrix[i];
+
+    for (int dy = -borderDist; dy <= borderDist; dy++) {
+        for (int dx = -borderDist; dx <= borderDist; dx++) {
+            if (std::abs(dx) + std::abs(dy) > borderDist) continue; // diamond shape
+            int nx = x + dx, ny = y + dy;
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+            if (indexMatrix[ny * width + nx] != c) return true;
+        }
+    }
+    return false;
+}
+
+
+// ── Uniform sampler with border-aware bias ────────────────────────────────────
 //
-// Picks a random point on the LINE SEGMENT between the centroid and the
-// gradient-derived color. Every point on that segment is guaranteed to be
-// inside the sphere (since both endpoints are inside or on the surface).
-// The result is then clamped as a safety net for floating point edge cases.
+// Interior pixels: t sampled uniformly in [0, 1]
+//                  → free to roam between centroid and gradient color
 //
-static LabF sampleUniform(const PaletteEntry& p,   // cluster centroid + error
+// Border pixels:   t sampled from a distribution heavily biased toward 1.0
+//                  → stays close to the gradient color, which already
+//                     encodes the correct boundary transition
+//
+// borderBias: how strongly to push toward gradient color at borders
+//             0.7 = moderate, 0.9 = very close to gradient color
+//
+static LabF sampleUniform(const PaletteEntry& p,
+                           const LabF& gradColor,
+                           std::mt19937& rng,
+                           bool isNearBorder,
+                           float borderBias = 0.85f) {
+    float radius = std::abs(p.error);
+    std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+
+    float t;
+    if (isNearBorder) {
+        // Sample t in [borderBias, 1.0] — close to gradient color
+        t = borderBias + uni(rng) * (1.0f - borderBias);
+    } else {
+        // Sample t freely in [0, 1]
+        t = uni(rng);
+    }
+
+    float L = p.L + t * (gradColor.L - p.L);
+    float a = p.a + t * (gradColor.a - p.a);
+    float b = p.b + t * (gradColor.b - p.b);
+
+    return clampToSphere(p.L, p.a, p.b, L, a, b, radius);
+}
+
+
+static LabF sampleUniform_pre(const PaletteEntry& p,   // cluster centroid + error
                            const LabF& gradColor,   // color from gradient blending
                            std::mt19937& rng) {
     float radius = std::abs(p.error);
@@ -826,16 +876,11 @@ int main(int argc, char* argv[]) {
         labFlat[i*3+2] = labImage[i].b;
     }
 
-    applyResidual(labFlat, data.residual, data.width, data.height, 2.5f);
+    applyResidual(labFlat, data.residual, data.width, data.height, 1.5f);
 
     // ── Deblock DCT artifacts ─────────────────────────────────────────────────
     deblockResidual(labFlat, data.width, data.height,
                     data.residual.config.blockSize,  // match the encoder's block size
-                    8,      // blendWidth: 2 = subtle, 3 = standard, 4 = aggressive
-                    2048.0f);  // threshold: below this = DCT artifact, above = real edge
-
-    deblockResidual(labFlat, data.width, data.height,
-                    data.residual.config.blockSize/2,  // match the encoder's block size
                     8,      // blendWidth: 2 = subtle, 3 = standard, 4 = aggressive
                     2048.0f);  // threshold: below this = DCT artifact, above = real edge
 
@@ -869,32 +914,66 @@ int main(int argc, char* argv[]) {
     std::mt19937 rng(seed);
 
 
-    for (int i = 0; i < data.width * data.height; i++) {
-        const PaletteEntry& p = data.palette[data.indexMatrix[i]];
-        LabF gradColor = labImage[i];
+    int borderDist  = 1;     // how many pixels from boundary counts as "near border"
+    float borderBias = 0.75f; // how close to gradient color border pixels should stay
 
-        // Always assign finalColor — noise is optional, RGB conversion is not
-        LabF finalColor = gradColor;
+    bool preNoise=true;
 
-        if (addNoise) {
-            switch (noiseMode) {
-                case 1:  finalColor = sampleUniform(p, gradColor, rng); break;
-                case 2:
-                default: finalColor = sampleGaussian(p, gradColor, rng, gaussBias); break;
+    if (preNoise){
+        for (int i = 0; i < data.width * data.height; i++) {
+            const PaletteEntry& p = data.palette[data.indexMatrix[i]];
+            LabF gradColor = labImage[i];
+
+            // Always assign finalColor — noise is optional, RGB conversion is not
+            LabF finalColor = gradColor;
+
+            if (addNoise) {
+                switch (noiseMode) {
+                    case 1:  finalColor = sampleUniform_pre(p, gradColor, rng); break;
+                    case 2:
+                    default: finalColor = sampleGaussian(p, gradColor, rng, gaussBias); break;
+                }
             }
-        }
 
-        RGB rgb = labToRGB(finalColor.L, finalColor.a, finalColor.b);
-        pixels.push_back(rgb.r);
-        pixels.push_back(rgb.g);
-        pixels.push_back(rgb.b);
+            RGB rgb = labToRGB(finalColor.L, finalColor.a, finalColor.b);
+            pixels.push_back(rgb.r);
+            pixels.push_back(rgb.g);
+            pixels.push_back(rgb.b);
+        }
     }
+    else{
+        for (int i = 0; i < data.width * data.height; i++) {
+            const PaletteEntry& p = data.palette[data.indexMatrix[i]];
+            LabF gradColor = labImage[i];
+            LabF finalColor = gradColor;
+
+            if (addNoise) {
+                bool border = nearBoundary(i, data.width, data.height,
+                                        data.indexMatrix, borderDist);
+                switch (noiseMode) {
+                    case 1:
+                        finalColor = sampleUniform(p, gradColor, rng, border, borderBias);
+                        break;
+                    case 2:
+                    default:
+                        finalColor = sampleGaussian(p, gradColor, rng, gaussBias);
+                        break;
+                }
+            }
+
+            RGB rgb = labToRGB(finalColor.L, finalColor.a, finalColor.b);
+            pixels.push_back(rgb.r);
+            pixels.push_back(rgb.g);
+            pixels.push_back(rgb.b);
+        }
+    }
+    
 
 
     // ── Region-confined blur ──────────────────────────────────────────────────
-    bool addInternalBlur=false;
+    bool addInternalBlur=true;
     if (addInternalBlur){
-        int blurRadius = 2;  // tune: 1 = subtle, 2 = noticeable, 3 = strong
+        int blurRadius = 1;  // tune: 1 = subtle, 2 = noticeable, 3 = strong
         pixels = blurWithinRegions(pixels, data.indexMatrix, data.width, data.height, blurRadius);
     }
     
@@ -908,8 +987,8 @@ int main(int argc, char* argv[]) {
     if (addsoftLowPass){
         // ── Global softening to reduce sharpening artifacts ───────────────────────
         pixels = softLowPass(pixels, data.width, data.height,
-                            2,      // radius: 1 = very gentle, 2 = more noticeable
-                            0.3f);  // strength: 0.3 = subtle, 0.5 = clearly softer
+                            1,      // radius: 1 = very gentle, 2 = more noticeable
+                            0.2f);  // strength: 0.3 = subtle, 0.5 = clearly softer
     
     }
 

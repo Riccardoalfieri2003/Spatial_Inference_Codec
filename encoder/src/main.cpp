@@ -31,8 +31,8 @@ int main(int argc, char* argv[]) {
               << " and Max Steps: " << maxStepsFromRoot << std::endl;
 
     // ... your image loading code ...
-    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
-    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
     
 
     int width, height, channels;
@@ -215,7 +215,7 @@ int main(int argc, char* argv[]) {
     //              4.0 → coarse, smallest file, visible banding on strong gradients
     //
     ResidualConfig rConfig;
-    rConfig.blockSize  = 16;
+    rConfig.blockSize  = 8;
     rConfig.keepCoeffs = 1;
     rConfig.quantStep  = 16.0f;
 
