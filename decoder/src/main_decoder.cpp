@@ -876,7 +876,7 @@ int main(int argc, char* argv[]) {
         labFlat[i*3+2] = labImage[i].b;
     }
 
-    applyResidual(labFlat, data.residual, data.width, data.height, 1.5f);
+    applyResidual(labFlat, data.residual, data.width, data.height, 2.5f);
 
     // ── Deblock DCT artifacts ─────────────────────────────────────────────────
     deblockResidual(labFlat, data.width, data.height,
@@ -919,52 +919,55 @@ int main(int argc, char* argv[]) {
 
     bool preNoise=true;
 
-    if (preNoise){
-        for (int i = 0; i < data.width * data.height; i++) {
-            const PaletteEntry& p = data.palette[data.indexMatrix[i]];
-            LabF gradColor = labImage[i];
+    if(addNoise){
 
-            // Always assign finalColor — noise is optional, RGB conversion is not
-            LabF finalColor = gradColor;
+        if (preNoise){
+            for (int i = 0; i < data.width * data.height; i++) {
+                const PaletteEntry& p = data.palette[data.indexMatrix[i]];
+                LabF gradColor = labImage[i];
 
-            if (addNoise) {
-                switch (noiseMode) {
-                    case 1:  finalColor = sampleUniform_pre(p, gradColor, rng); break;
-                    case 2:
-                    default: finalColor = sampleGaussian(p, gradColor, rng, gaussBias); break;
+                // Always assign finalColor — noise is optional, RGB conversion is not
+                LabF finalColor = gradColor;
+
+                if (addNoise) {
+                    switch (noiseMode) {
+                        case 1:  finalColor = sampleUniform_pre(p, gradColor, rng); break;
+                        case 2:
+                        default: finalColor = sampleGaussian(p, gradColor, rng, gaussBias); break;
+                    }
                 }
-            }
 
-            RGB rgb = labToRGB(finalColor.L, finalColor.a, finalColor.b);
-            pixels.push_back(rgb.r);
-            pixels.push_back(rgb.g);
-            pixels.push_back(rgb.b);
+                RGB rgb = labToRGB(finalColor.L, finalColor.a, finalColor.b);
+                pixels.push_back(rgb.r);
+                pixels.push_back(rgb.g);
+                pixels.push_back(rgb.b);
+            }
         }
-    }
-    else{
-        for (int i = 0; i < data.width * data.height; i++) {
-            const PaletteEntry& p = data.palette[data.indexMatrix[i]];
-            LabF gradColor = labImage[i];
-            LabF finalColor = gradColor;
+        else{
+            for (int i = 0; i < data.width * data.height; i++) {
+                const PaletteEntry& p = data.palette[data.indexMatrix[i]];
+                LabF gradColor = labImage[i];
+                LabF finalColor = gradColor;
 
-            if (addNoise) {
-                bool border = nearBoundary(i, data.width, data.height,
-                                        data.indexMatrix, borderDist);
-                switch (noiseMode) {
-                    case 1:
-                        finalColor = sampleUniform(p, gradColor, rng, border, borderBias);
-                        break;
-                    case 2:
-                    default:
-                        finalColor = sampleGaussian(p, gradColor, rng, gaussBias);
-                        break;
+                if (addNoise) {
+                    bool border = nearBoundary(i, data.width, data.height,
+                                            data.indexMatrix, borderDist);
+                    switch (noiseMode) {
+                        case 1:
+                            finalColor = sampleUniform(p, gradColor, rng, border, borderBias);
+                            break;
+                        case 2:
+                        default:
+                            finalColor = sampleGaussian(p, gradColor, rng, gaussBias);
+                            break;
+                    }
                 }
-            }
 
-            RGB rgb = labToRGB(finalColor.L, finalColor.a, finalColor.b);
-            pixels.push_back(rgb.r);
-            pixels.push_back(rgb.g);
-            pixels.push_back(rgb.b);
+                RGB rgb = labToRGB(finalColor.L, finalColor.a, finalColor.b);
+                pixels.push_back(rgb.r);
+                pixels.push_back(rgb.g);
+                pixels.push_back(rgb.b);
+            }
         }
     }
     
@@ -983,7 +986,7 @@ int main(int argc, char* argv[]) {
     }
     
 
-    bool addsoftLowPass=false;
+    bool addsoftLowPass=true;
     if (addsoftLowPass){
         // ── Global softening to reduce sharpening artifacts ───────────────────────
         pixels = softLowPass(pixels, data.width, data.height,

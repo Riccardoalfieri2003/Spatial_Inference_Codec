@@ -18,5 +18,5 @@ add_executable(encoder
 add_executable(decoder 
     decoder/src/main_decoder.cpp
 )
-target_include_directories(decoder PRIVATE decoder/lib)
-target_include_directories(decoder PRIVATE decoder/include encoder/include)
+target_include_directories(encoder PRIVATE encoder/include encoder/lib util)
+target_include_directories(decoder PRIVATE decoder/include encoder/include decoder/lib util)

@@ -10,11 +10,10 @@
 #include <cmath>
 #include <filesystem>
 #include "ResidualEncoder.hpp"
+#include <PaletteEntry.hpp>
+#include "Indexmatrixsubsampling_dec.hpp"
 
-// ── Palette entry ─────────────────────────────────────────────────────────────
-struct PaletteEntry {
-    float L, a, b, error;
-};
+
 
 // ── Gradient precision (mirrors GradientEncoder.hpp) ─────────────────────────
 enum class GradientPrecision : uint8_t {
@@ -64,9 +63,12 @@ struct GradientData {
     bool valid = false;
 };
 
+
+
 // ── Full decoded SIF data ─────────────────────────────────────────────────────
 struct SIFData {
-    int width, height;
+    int width, height;         // subsampled dims (used during loading)
+    int origWidth, origHeight; // ← NEW: full resolution dims
     std::vector<PaletteEntry>  palette;
     std::vector<int>           indexMatrix;
     GradientData               gradients;
@@ -163,14 +165,31 @@ SIFData loadSIF(const std::string& path) {
         return result;
     }
 
+    bool reduceMatrix = true;
+
     // ── 1. Header ────────────────────────────────────────────────────────────
     uint32_t w = 0, h = 0;
+    uint32_t origW = 0, origH = 0;
     uint16_t palSize = 0;
-    file.read((char*)&w,       4);
-    file.read((char*)&h,       4);
+
+    file.read((char*)&w, 4);
+    file.read((char*)&h, 4);
+
+    if (reduceMatrix) {
+        file.read((char*)&origW,   4);
+        file.read((char*)&origH,   4);
+    }
+
     file.read((char*)&palSize, 2);
-    result.width  = (int)w;
-    result.height = (int)h;
+
+    result.width      = (int)w;
+    result.height     = (int)h;
+    result.origWidth  = reduceMatrix ? (int)origW : (int)w;
+    result.origHeight = reduceMatrix ? (int)origH : (int)h;
+
+    std::cout << "DEBUG header: subW=" << w << " subH=" << h
+              << " origW=" << result.origWidth << " origH=" << result.origHeight
+              << " palSize=" << palSize << "\n";
 
     // ── 2. Palette ───────────────────────────────────────────────────────────
     result.palette.resize(palSize);
@@ -225,7 +244,18 @@ SIFData loadSIF(const std::string& path) {
 
     freeTree(root);
 
-    // Sanity check on index matrix
+    // ── 6. Upsample if matrix was subsampled ──────────────────────────────────
+    if (reduceMatrix) {
+        result.indexMatrix = upsampleIndexMatrix(
+            result.indexMatrix,
+            result.width,     result.height,
+            result.origWidth, result.origHeight,
+            result.palette);
+        result.width  = result.origWidth;
+        result.height = result.origHeight;
+    }
+
+    // Sanity check
     int expectedPixels = result.width * result.height;
     if ((int)result.indexMatrix.size() != expectedPixels) {
         std::cerr << "Warning: expected " << expectedPixels

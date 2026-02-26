@@ -12,6 +12,7 @@
 
 #include <iostream>
 #include <string> // For std::stof and std::stoi
+#include <Indexmatrixsubsampling.hpp>
 
 
 int main(int argc, char* argv[]) {
@@ -31,8 +32,8 @@ int main(int argc, char* argv[]) {
               << " and Max Steps: " << maxStepsFromRoot << std::endl;
 
     // ... your image loading code ...
-    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
-    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
+    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
     
 
     int width, height, channels;
@@ -215,16 +216,37 @@ int main(int argc, char* argv[]) {
     //              4.0 → coarse, smallest file, visible banding on strong gradients
     //
     ResidualConfig rConfig;
-    rConfig.blockSize  = 8;
-    rConfig.keepCoeffs = 1;
-    rConfig.quantStep  = 16.0f;
+    rConfig.blockSize  = 16;
+    rConfig.keepCoeffs = 2;
+    rConfig.quantStep  = 8.0f;
 
     ResidualData residual = encodeResidual(originalLab, quantizedLab, width, height, rConfig);
 
     
 
-    // ── Save ─────────────────────────────────────────────────────────────────
-    saveSIF_claude("output_claude.sif", width, height, palette, indexMatrix, gradients, residual);
+    bool reduceMatrix=true;
+
+    if (reduceMatrix){
+
+        // Subsample the index matrix before saving
+        int subW, subH;
+        std::vector<int> subMatrix = subsampleIndexMatrix(indexMatrix, width, height, subW, subH);
+
+        // Pass subMatrix instead of indexMatrix, and store subW/subH in the header
+        saveSIF_claude_reduce("output_claude.sif", 
+                subW, subH,        // ← subsampled dims go as w, h
+                width, height,     // ← full dims go as origW, origH
+                palette, subMatrix, gradients, residual);
+
+    }
+    else{
+
+        // ── Save ─────────────────────────────────────────────────────────────────
+        saveSIF_claude("output_claude.sif", width, height, palette, indexMatrix, gradients, residual);
+
+    }
+    
+
         
 
     stbi_image_free(imgData);

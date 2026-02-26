@@ -35,7 +35,7 @@ public:
     }
 };
 
-struct PaletteEntry { float L, a, b, error; };
+
 struct CompactEntry { int8_t L, a, b, e; };
 
     
