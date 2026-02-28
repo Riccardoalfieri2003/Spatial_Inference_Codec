@@ -20,3 +20,14 @@ target_include_directories(encoder_mod PRIVATE
     encoder_mod/lib 
     util
 )
+
+add_executable(decoder_mod
+    decoder_mod/src/main_decoder_mod.cpp
+    encoder_mod/src/ImageConverter_mod.cpp
+)
+
+target_include_directories(decoder_mod PRIVATE 
+    decoder_mod/include 
+    decoder_mod/lib 
+    util
+)
