@@ -29,10 +29,10 @@ static float applyShape(float t, uint8_t shape) {
 static int widthPixels(uint8_t w) {
     switch (w) {
         case 0: return 1;
-        case 1: return 3;
-        case 2: return 6;
-        case 3: return 12;
-        default: return 3;
+        case 1: return 2;
+        case 2: return 3;
+        case 3: return 6;
+        default: return 2;
     }
 }
 

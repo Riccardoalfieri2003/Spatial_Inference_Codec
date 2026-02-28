@@ -454,6 +454,9 @@ int main(int argc, char* argv[]) {
     applyGradients(residualImage, data.residualIndexMatrix, data.residualPalette, 
                    data.residualGradients, data.width, data.height);
 
+
+    
+
     // ── Step 5: Reconstruct final image (quantized + gradients + residual) ────
     std::vector<LabF> finalImage(totalPixels);
     for (int i = 0; i < totalPixels; i++) {
@@ -465,6 +468,22 @@ int main(int argc, char* argv[]) {
     }
 
     
+    // ── Debug: save and open intermediate images ──────────────────────────────
+    auto saveAndOpen = [&](const std::vector<LabF>& img, const std::string& name, float labShift = 0.0f) {
+        std::vector<unsigned char> buf(totalPixels * 3);
+        for (int i = 0; i < totalPixels; i++) {
+            ImageConverter::convertPixelLabToRGB(
+                img[i].L + labShift, img[i].a, img[i].b,
+                buf[i*3], buf[i*3+1], buf[i*3+2]);
+        }
+        stbi_write_png(name.c_str(), data.width, data.height, 3, buf.data(), data.width * 3);
+        system(("start " + name).c_str());
+    };
+
+    saveAndOpen(labImage,      "debug_quantized_gradients.png");
+    saveAndOpen(residualImage, "debug_residual_gradients.png", 50.0f); // shift so zero=grey
+    saveAndOpen(finalImage,    "debug_final.png");
+    
 
 
     // ── Step 6: Sphere-constrained sampling ───────────────────────────────────
@@ -474,61 +493,101 @@ int main(int argc, char* argv[]) {
     // Sample a random point on the surface of Sphere 2, constrained to lie
     // within Sphere 1. If no valid point found after max attempts, fall back
     // to the center of Sphere 2.
-
-    std::mt19937 rng(42); // seed for replication
-    std::normal_distribution<float> gauss(0.0f, 1.0f);
-
     std::vector<LabF> sampledImage(totalPixels);
 
-    for (int i = 0; i < totalPixels; i++) {
-        // Centers and radii
-        LabF  Q  = labImage[i];    // quantized + main gradients
-        LabF  QR = finalImage[i];  // quantized + main gradients + residual + res gradients
-        float e1 = data.palette[data.indexMatrix[i]].error;
-        float e2 = data.residualPalette[data.residualIndexMatrix[i]].error;
+    bool random=false;
 
-        // If e2 is effectively zero, just use the center
-        if (e2 < 1e-4f) {
-            sampledImage[i] = QR;
-            continue;
+    if(random){
+
+        std::mt19937 rng(42); // seed for replication
+        std::normal_distribution<float> gauss(0.0f, 1.0f);
+
+        for (int i = 0; i < totalPixels; i++) {
+            // Centers and radii
+            LabF  Q  = labImage[i];    // quantized + main gradients
+            LabF  QR = finalImage[i];  // quantized + main gradients + residual + res gradients
+            float e1 = data.palette[data.indexMatrix[i]].error;
+            float e2 = data.residualPalette[data.residualIndexMatrix[i]].error;
+
+            // If e2 is effectively zero, just use the center
+            if (e2 < 1e-4f) {
+                sampledImage[i] = QR;
+                continue;
+            }
+
+            // Sample random point on surface of Sphere 2 within Sphere 1
+            // Max attempts before falling back to center
+            const int maxAttempts = 32;
+            bool found = false;
+            LabF candidate;
+
+            for (int attempt = 0; attempt < maxAttempts; attempt++) {
+                // Random direction via Gaussian sampling (gives uniform sphere surface)
+                float dL = gauss(rng);
+                float da = gauss(rng);
+                float db = gauss(rng);
+
+                // Normalize to unit sphere, then scale by e2
+                float norm = std::sqrt(dL*dL + da*da + db*db);
+                if (norm < 1e-6f) continue;
+
+                candidate = {
+                    QR.L + e2 * dL / norm,
+                    QR.a + e2 * da / norm,
+                    QR.b + e2 * db / norm
+                };
+
+                // Check if candidate lies within Sphere 1
+                float distToQ1 = std::sqrt(
+                    (candidate.L - Q.L) * (candidate.L - Q.L) +
+                    (candidate.a - Q.a) * (candidate.a - Q.a) +
+                    (candidate.b - Q.b) * (candidate.b - Q.b)
+                );
+
+                if (distToQ1 <= e1) {
+                    found = true;
+                    break;
+                }
+            }
+
+            sampledImage[i] = found ? candidate : QR;
         }
+    }else{
+        // ── Step 6: Sphere-constrained reconstruction ─────────────────────────────
+        // For each pixel, find the closest point on the surface of Sphere 2
+        // (center=QR, radius=e2) to the centroid of Sphere 1 (center=Q).
+        // This is the point on Sphere 2's surface that best agrees with Sphere 1.
 
-        // Sample random point on surface of Sphere 2 within Sphere 1
-        // Max attempts before falling back to center
-        const int maxAttempts = 32;
-        bool found = false;
-        LabF candidate;
+        for (int i = 0; i < totalPixels; i++) {
+            LabF  Q  = labImage[i];    // quantized + main gradients
+            LabF  QR = finalImage[i];  // quantized + main gradients + residual + res gradients
+            float e2 = data.residualPalette[data.residualIndexMatrix[i]].error;
 
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            // Random direction via Gaussian sampling (gives uniform sphere surface)
-            float dL = gauss(rng);
-            float da = gauss(rng);
-            float db = gauss(rng);
+            // If e2 is effectively zero, just use the center
+            if (e2 < 1e-4f) {
+                sampledImage[i] = QR;
+                continue;
+            }
 
-            // Normalize to unit sphere, then scale by e2
+            // Direction from center of Sphere 2 (QR) toward center of Sphere 1 (Q)
+            float dL = Q.L - QR.L;
+            float da = Q.a - QR.a;
+            float db = Q.b - QR.b;
             float norm = std::sqrt(dL*dL + da*da + db*db);
-            if (norm < 1e-6f) continue;
 
-            candidate = {
+            // If centers coincide, any point on surface works — just use QR
+            if (norm < 1e-6f) {
+                sampledImage[i] = QR;
+                continue;
+            }
+
+            // Closest point on surface of Sphere 2 toward Q
+            sampledImage[i] = {
                 QR.L + e2 * dL / norm,
                 QR.a + e2 * da / norm,
                 QR.b + e2 * db / norm
             };
-
-            // Check if candidate lies within Sphere 1
-            float distToQ1 = std::sqrt(
-                (candidate.L - Q.L) * (candidate.L - Q.L) +
-                (candidate.a - Q.a) * (candidate.a - Q.a) +
-                (candidate.b - Q.b) * (candidate.b - Q.b)
-            );
-
-            if (distToQ1 <= e1) {
-                found = true;
-                break;
-            }
         }
-
-        sampledImage[i] = found ? candidate : QR;
     }
 
     // ── Step 7: Convert Lab → RGB and save PNG ────────────────────────────────

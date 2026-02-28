@@ -170,7 +170,7 @@ int main(int argc, char* argv[]) {
         indexMatrix,
         imgLabFlat,
         width, height,
-        GradientPrecision::BITS_4,
+        GradientPrecision::BITS_2,
         1.0f,   // changeThreshold — lower = more sensitive to gradient changes
         64       // segmentSize — smaller = more frequent updates along boundaries
     );
@@ -298,9 +298,9 @@ int main(int argc, char* argv[]) {
         residualIndexMatrix,
         residualLab,          // std::vector<LabPixelFlat> — already computed
         width, height,
-        GradientPrecision::BITS_2,
-        0.5f,
-        32
+        GradientPrecision::BITS_4,
+        0.25f,
+        16
     );
 
 
@@ -338,9 +338,9 @@ int main(int argc, char* argv[]) {
         stbi_write_png("out_residual.png",  width, height, 3, imgResidualRGB.data(), width * 3);
 
         // Open all three side by side on Windows
-        system("start out_original.png");
-        system("start out_quantized.png");
-        system("start out_residual.png");
+        //system("start out_original.png");
+        //system("start out_quantized.png");
+        //system("start out_residual.png");
 
         std::cout << "\nImages saved and opened: out_original.png, out_quantized.png, out_residual.png\n";
     }
@@ -359,7 +359,7 @@ int main(int argc, char* argv[]) {
     }
 
     stbi_write_png("out_residual_quantized.png", width, height, 3, imgResidualQuantRGB.data(), width * 3);
-    system("start out_residual_quantized.png");
+    //system("start out_residual_quantized.png");
 
 
     saveSIF_v2("output_claude.sif", width, height, palette, indexMatrix, gradients, residualPalette, residualIndexMatrix, residualGradients);
