@@ -484,6 +484,37 @@ void saveSIF_claude(const std::string& path,
 
 */
 
+
+// ── float16 encode/decode helpers ─────────────────────────────────────────
+inline uint16_t floatToHalf(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    uint16_t sign     = (x >> 16) & 0x8000;
+    int32_t  exponent = ((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = x & 0x7FFFFF;
+
+    if (exponent <= 0)  return sign;               // underflow → zero
+    if (exponent >= 31) return sign | 0x7C00;      // overflow → inf
+    return sign | (exponent << 10) | (mantissa >> 13);
+}
+
+inline float halfToFloat(uint16_t h) {
+    uint32_t sign     = (h & 0x8000) << 16;
+    uint32_t exponent = (h & 0x7C00) >> 10;
+    uint32_t mantissa = (h & 0x03FF);
+
+    if (exponent == 0)  return 0.0f;               // zero/denormal → zero
+    if (exponent == 31) return std::numeric_limits<float>::infinity();
+
+    exponent = exponent - 15 + 127;
+    uint32_t result = sign | (exponent << 23) | (mantissa << 13);
+    float f;
+    std::memcpy(&f, &result, 4);
+    return f;
+}
+
+
+
 void saveSIF_v2(const std::string& path,
                 int width, int height,
                 const std::vector<PaletteEntry>& palette,
@@ -514,14 +545,12 @@ void saveSIF_v2(const std::string& path,
         uint16_t palSize = (uint16_t)pal.size();
         file.write((char*)&palSize, 2);
         for (const auto& p : pal) {
-            int8_t L = (int8_t)std::round(p.L);
-            int8_t a = (int8_t)std::round(p.a);
-            int8_t b = (int8_t)std::round(p.b);
-            file.write((char*)&L, 1); file.write((char*)&a, 1);
-            file.write((char*)&b, 1);
-            //int8_t e = (int8_t)std::floor(p.error);
-            //file.write((char*)&L, 1); file.write((char*)&a, 1);
-            //file.write((char*)&b, 1); file.write((char*)&e, 1);
+            uint16_t L = floatToHalf(p.L);
+            uint16_t a = floatToHalf(p.a);
+            uint16_t b = floatToHalf(p.b);
+            file.write((char*)&L, 2);
+            file.write((char*)&a, 2);
+            file.write((char*)&b, 2);
         }
 
         bitsPerIndex = 1;
@@ -595,7 +624,7 @@ void saveSIF_v2(const std::string& path,
 
     auto encodeGradientSection = [&](const GradientData& grad) {
         int precBits = (int)grad.precision;
-        uint8_t precByte = (uint8_t)grad.precision;
+        uint16_t precByte = (uint16_t)grad.precision;
         file.write((char*)&precByte, 1);
 
         uint32_t queueSize = (uint32_t)grad.queue.size();

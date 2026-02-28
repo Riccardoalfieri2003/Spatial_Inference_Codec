@@ -113,6 +113,35 @@ static void freeTree(DecodeNode* node) {
 }
 
 
+// ── float16 encode/decode helpers ─────────────────────────────────────────
+inline uint16_t floatToHalf(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    uint16_t sign     = (x >> 16) & 0x8000;
+    int32_t  exponent = ((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = x & 0x7FFFFF;
+
+    if (exponent <= 0)  return sign;               // underflow → zero
+    if (exponent >= 31) return sign | 0x7C00;      // overflow → inf
+    return sign | (exponent << 10) | (mantissa >> 13);
+}
+
+inline float halfToFloat(uint16_t h) {
+    uint32_t sign     = (h & 0x8000) << 16;
+    uint32_t exponent = (h & 0x7C00) >> 10;
+    uint32_t mantissa = (h & 0x03FF);
+
+    if (exponent == 0)  return 0.0f;               // zero/denormal → zero
+    if (exponent == 31) return std::numeric_limits<float>::infinity();
+
+    exponent = exponent - 15 + 127;
+    uint32_t result = sign | (exponent << 23) | (mantissa << 13);
+    float f;
+    std::memcpy(&f, &result, 4);
+    return f;
+}
+
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Main decode function
 // ═════════════════════════════════════════════════════════════════════════════
@@ -133,19 +162,32 @@ SIFData loadSIF(const std::string& path) {
         uint16_t palSize = 0;
         file.read((char*)&palSize, 2);
         pal.resize(palSize);
+
+        /*
         for (auto& p : pal) {
-            /*
+            
             int8_t L, a, b, e;
             file.read((char*)&L, 1); file.read((char*)&a, 1);
             file.read((char*)&b, 1); file.read((char*)&e, 1);
             p.L = (float)L; p.a = (float)a;
             p.b = (float)b; p.error = (float)e;
-            */
+            
 
             int8_t L, a, b;
             file.read((char*)&L, 1); file.read((char*)&a, 1);
             file.read((char*)&b, 1);
             p.L = (float)L; p.a = (float)a; p.b = (float)b;
+            p.error = 0.0f;
+        }*/
+
+        for (auto& p : pal) {
+            uint16_t L, a, b;
+            file.read((char*)&L, 2);
+            file.read((char*)&a, 2);
+            file.read((char*)&b, 2);
+            p.L = halfToFloat(L);
+            p.a = halfToFloat(a);
+            p.b = halfToFloat(b);
             p.error = 0.0f;
         }
 
@@ -192,7 +234,7 @@ SIFData loadSIF(const std::string& path) {
     };
 
     auto decodeGradientSection = [&](GradientData& gradients) {
-        uint8_t precByte = 0;
+        uint16_t precByte = 0;
         file.read((char*)&precByte, 1);
         gradients.precision = (GradientPrecision)precByte;
         int precBits = (int)gradients.precision;
@@ -207,7 +249,7 @@ SIFData loadSIF(const std::string& path) {
         BitReader brGrad(file);
         gradients.queue.reserve(queueSize);
         for (uint32_t i = 0; i < queueSize; i++) {
-            uint8_t packed = (uint8_t)brGrad.read(precBits);
+            uint16_t packed = (uint16_t)brGrad.read(precBits);
             gradients.queue.push_back(
                 GradientDescriptor::unpack(packed, gradients.precision));
         }
