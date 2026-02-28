@@ -292,6 +292,18 @@ int main(int argc, char* argv[]) {
 
 
 
+    // ── Encode gradients on residual ─────────────────────────────────────────
+    // Build flat Lab array for residual (already have residualLab)
+    GradientData residualGradients = encodeGradients(
+        residualIndexMatrix,
+        residualLab,          // std::vector<LabPixelFlat> — already computed
+        width, height,
+        GradientPrecision::BITS_2,
+        0.5f,
+        32
+    );
+
+
 
 
 
@@ -350,7 +362,7 @@ int main(int argc, char* argv[]) {
     system("start out_residual_quantized.png");
 
 
-    saveSIF_v2("output_claude.sif", width, height, palette, indexMatrix, gradients, residualPalette, residualIndexMatrix);
+    saveSIF_v2("output_claude.sif", width, height, palette, indexMatrix, gradients, residualPalette, residualIndexMatrix, residualGradients);
 
     
 

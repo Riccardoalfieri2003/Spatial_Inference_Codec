@@ -491,7 +491,8 @@ void saveSIF_v2(const std::string& path,
                 const std::vector<int>& indexMatrix,
                 const GradientData& gradients,
                 const std::vector<PaletteEntry>& residualPalette,
-                const std::vector<int>& residualIndexMatrix)
+                const std::vector<int>& residualIndexMatrix,
+                const GradientData& residualGradients)
 {
     std::ofstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -630,6 +631,28 @@ void saveSIF_v2(const std::string& path,
     int resMaxRun = 1, resBitsPerIndex = 1;
     encodeSection(residualPalette, residualIndexMatrix, resRLE, resHuff, resMaxRun, resBitsPerIndex);
 
+    // ── 5. Residual gradient section ─────────────────────────────────────────
+    int resPrecBits = (int)residualGradients.precision;
+    uint8_t resPrecByte = (uint8_t)residualGradients.precision;
+    file.write((char*)&resPrecByte, 1);
+
+    uint32_t resQueueSize = (uint32_t)residualGradients.queue.size();
+    file.write((char*)&resQueueSize, 4);
+
+    BitWriter bwResGrad(file);
+    for (const auto& desc : residualGradients.queue)
+        bwResGrad.write(desc.pack(residualGradients.precision), resPrecBits);
+    bwResGrad.flush();
+
+    uint32_t resCpCount = (uint32_t)residualGradients.changePoints.size();
+    file.write((char*)&resCpCount, 4);
+    for (const auto& cp : residualGradients.changePoints) {
+        file.write((char*)&cp.x,        2);
+        file.write((char*)&cp.y,        2);
+        file.write((char*)&cp.queueIdx, 4);
+    }
+
+
     file.close();
 
     // ── Statistics ────────────────────────────────────────────────────────────
@@ -713,6 +736,20 @@ void saveSIF_v2(const std::string& path,
     row("  - Huff table",    resHuffTblBytes);
     row("  - RLE header",    resRleHdrBytes);
     row("  - RLE stream",    resRleBytes);
+
+    size_t resGradPrecBytes  = 1;
+    size_t resGradQueueBytes = 4 + ((residualGradients.queue.size() * resPrecBits + 7) / 8);
+    size_t resGradCPBytes    = 4 + residualGradients.changePoints.size() * (2+2+4);
+    size_t resGradTotalBytes = resGradPrecBytes + resGradQueueBytes + resGradCPBytes;
+
+    // update resTotalBytes to include it:
+    resTotalBytes += resGradTotalBytes;
+
+    // add rows:
+    row("Res gradient",      resGradTotalBytes);
+    row("  - precision",     resGradPrecBytes);
+    row("  - queue",         resGradQueueBytes);
+    row("  - change pts",    resGradCPBytes);
     std::cout << "|------------------------------------------------------|\n";
     row("TOTAL",             fileSize);
     std::cout << "|------------------------------------------------------|\n";
