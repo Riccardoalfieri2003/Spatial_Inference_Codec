@@ -26,6 +26,9 @@ struct SIFData {
     std::vector<int>          residualIndexMatrix;
     GradientData              residualGradients;
     bool valid = false;
+    std::vector<PaletteEntry> residualPalette2;
+    std::vector<int>          residualIndexMatrix2;
+    GradientData              residualGradients2;
 };
 
 
@@ -56,6 +59,11 @@ public:
             bitCount--;
         }
         return result;
+    }
+    void sync() {
+        // Discard any partially-read byte remaining in buffer
+        buffer   = 0;
+        bitCount = 0;
     }
 };
 
@@ -117,31 +125,35 @@ SIFData loadSIF(const std::string& path) {
         return result;
     }
 
-    // ── Helper: decode a palette + RLE/Huffman index matrix ──────────────────
     auto decodeSection = [&](
         std::vector<PaletteEntry>& pal,
         std::vector<int>& idxMatrix,
         int totalPixels)
     {
-        // Palette
         uint16_t palSize = 0;
         file.read((char*)&palSize, 2);
         pal.resize(palSize);
         for (auto& p : pal) {
+            /*
             int8_t L, a, b, e;
             file.read((char*)&L, 1); file.read((char*)&a, 1);
             file.read((char*)&b, 1); file.read((char*)&e, 1);
             p.L = (float)L; p.a = (float)a;
             p.b = (float)b; p.error = (float)e;
+            */
+
+            int8_t L, a, b;
+            file.read((char*)&L, 1); file.read((char*)&a, 1);
+            file.read((char*)&b, 1);
+            p.L = (float)L; p.a = (float)a; p.b = (float)b;
+            p.error = 0.0f;
         }
 
-        // Metadata
         uint8_t  bitsPerIndex = 0;
         uint32_t maxRun       = 0;
         file.read((char*)&bitsPerIndex, 1);
         file.read((char*)&maxRun,       4);
 
-        // Huffman table
         uint16_t tableEntries = 0;
         file.read((char*)&tableEntries, 2);
 
@@ -156,9 +168,12 @@ SIFData loadSIF(const std::string& path) {
             insertCode(root, code, (int)len, key);
         }
 
-        // RLE + Huffman bitstream
-        uint32_t rleCount = 0;
-        file.read((char*)&rleCount, 4);
+        uint32_t rleCount   = 0;
+        uint32_t byteCount  = 0;
+        file.read((char*)&rleCount,  4);
+        file.read((char*)&byteCount, 4);
+
+        auto streamStart = file.tellg();
 
         BitReader br(file);
         idxMatrix.reserve(totalPixels);
@@ -171,18 +186,23 @@ SIFData loadSIF(const std::string& path) {
                 idxMatrix.push_back(value);
         }
 
+        // Seek to exact end of bitstream, bypassing any padding bits
+        file.seekg(streamStart + (std::streamoff)byteCount);
         freeTree(root);
     };
 
-    // ── Helper: decode a gradient section ────────────────────────────────────
     auto decodeGradientSection = [&](GradientData& gradients) {
         uint8_t precByte = 0;
         file.read((char*)&precByte, 1);
         gradients.precision = (GradientPrecision)precByte;
         int precBits = (int)gradients.precision;
 
-        uint32_t queueSize = 0;
+        uint32_t queueSize  = 0;
+        uint32_t byteCount  = 0;
         file.read((char*)&queueSize, 4);
+        file.read((char*)&byteCount, 4);
+
+        auto streamStart = file.tellg();
 
         BitReader brGrad(file);
         gradients.queue.reserve(queueSize);
@@ -191,6 +211,9 @@ SIFData loadSIF(const std::string& path) {
             gradients.queue.push_back(
                 GradientDescriptor::unpack(packed, gradients.precision));
         }
+
+        // Seek to exact end of bitstream, bypassing any padding bits
+        file.seekg(streamStart + (std::streamoff)byteCount);
 
         uint32_t cpCount = 0;
         file.read((char*)&cpCount, 4);
@@ -202,54 +225,62 @@ SIFData loadSIF(const std::string& path) {
             file.read((char*)&cp.queueIdx, 4);
             gradients.changePoints.push_back(cp);
         }
-
         gradients.valid = true;
     };
 
-    // ── 1. Header ────────────────────────────────────────────────────────────
+    // ── 1. Header ─────────────────────────────────────────────────────────────
     uint32_t w = 0, h = 0;
     file.read((char*)&w, 4);
     file.read((char*)&h, 4);
     result.width  = (int)w;
     result.height = (int)h;
     int totalPixels = result.width * result.height;
-
     std::cout << "Header: " << w << "x" << h << "\n";
 
-    // ── 2. Main palette + index matrix ───────────────────────────────────────
+    // ── 2. Main palette + index matrix ────────────────────────────────────────
     decodeSection(result.palette, result.indexMatrix, totalPixels);
+    std::cout << "Main palette: " << result.palette.size() << " colors, "
+              << result.indexMatrix.size() << " pixels\n";
 
-    std::cout << "Main palette: " << result.palette.size() << " colors\n";
-    std::cout << "Main index matrix: " << result.indexMatrix.size() << " pixels\n";
-
-    // ── 3. Gradient section ───────────────────────────────────────────────────
+    // ── 3. Main gradients ─────────────────────────────────────────────────────
     decodeGradientSection(result.gradients);
+    std::cout << "Main gradients: " << result.gradients.queue.size()
+              << " descriptors, " << result.gradients.changePoints.size() << " change points\n";
 
-    std::cout << "Gradients: " << result.gradients.queue.size() << " descriptors, "
-              << result.gradients.changePoints.size() << " change points\n";
-
-    // ── 4. Residual section ───────────────────────────────────────────────────
-    uint8_t residualMagic = 0;
-    file.read((char*)&residualMagic, 1);
-
-    if (!file.fail() && residualMagic == 0xFE) {
+    // ── 4. Residual 1 (magic 0xFE) ────────────────────────────────────────────
+    uint8_t magic1 = 0;
+    file.read((char*)&magic1, 1);
+    if (!file.fail() && magic1 == 0xFE) {
         decodeSection(result.residualPalette, result.residualIndexMatrix, totalPixels);
+        std::cout << "Residual 1 palette: " << result.residualPalette.size() << " colors, "
+                  << result.residualIndexMatrix.size() << " pixels\n";
 
-        std::cout << "Residual palette: " << result.residualPalette.size() << " colors\n";
-        std::cout << "Residual index matrix: " << result.residualIndexMatrix.size() << " pixels\n";
-
-        // ── 5. Residual gradient section ─────────────────────────────────────
         decodeGradientSection(result.residualGradients);
-
-        std::cout << "Residual gradients: " << result.residualGradients.queue.size()
-                  << " descriptors, " << result.residualGradients.changePoints.size()
-                  << " change points\n";
-
+        std::cout << "Residual 1 gradients: " << result.residualGradients.queue.size()
+                  << " descriptors, " << result.residualGradients.changePoints.size() << " change points\n";
     } else {
-        std::cout << "No residual data in file.\n";
+        std::cout << "No residual 1 data in file.\n";
+        goto done;
     }
 
-    // ── Sanity check ─────────────────────────────────────────────────────────
+    // ── 5. Residual 2 (magic 0xFD) ────────────────────────────────────────────
+    {
+        uint8_t magic2 = 0;
+        file.read((char*)&magic2, 1);
+        if (!file.fail() && magic2 == 0xFD) {
+            decodeSection(result.residualPalette2, result.residualIndexMatrix2, totalPixels);
+            std::cout << "Residual 2 palette: " << result.residualPalette2.size() << " colors, "
+                      << result.residualIndexMatrix2.size() << " pixels\n";
+
+            decodeGradientSection(result.residualGradients2);
+            std::cout << "Residual 2 gradients: " << result.residualGradients2.queue.size()
+                      << " descriptors, " << result.residualGradients2.changePoints.size() << " change points\n";
+        } else {
+            std::cout << "No residual 2 data in file.\n";
+        }
+    }
+
+done:
     if ((int)result.indexMatrix.size() == totalPixels)
         result.valid = true;
     else
@@ -259,10 +290,10 @@ SIFData loadSIF(const std::string& path) {
     file.close();
 
     std::cout << "\n--- SIF Decode Complete ---\n";
-    std::cout << "Resolution:      " << result.width << "x" << result.height << "\n";
-    std::cout << "Main palette:    " << result.palette.size() << " colors\n";
-    std::cout << "Residual palette:" << result.residualPalette.size() << " colors\n";
-    std::cout << "Pixels:          " << result.indexMatrix.size() << "\n";
+    std::cout << "Resolution:       " << result.width << "x" << result.height << "\n";
+    std::cout << "Main palette:     " << result.palette.size() << " colors\n";
+    std::cout << "Residual 1 pal:   " << result.residualPalette.size() << " colors\n";
+    std::cout << "Residual 2 pal:   " << result.residualPalette2.size() << " colors\n";
 
     return result;
 }

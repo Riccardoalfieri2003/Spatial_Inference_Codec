@@ -29,9 +29,9 @@ static float applyShape(float t, uint8_t shape) {
 static int widthPixels(uint8_t w) {
     switch (w) {
         case 0: return 1;
-        case 1: return 2;
-        case 2: return 3;
-        case 3: return 6;
+        case 1: return 3;
+        case 2: return 6;
+        case 3: return 12;
         default: return 2;
     }
 }
@@ -81,7 +81,7 @@ static uint32_t activeQueueIdx(
 
 
 void applyGradients(
-    std::vector<LabF>&       labImage,   // in/out: flat Lab pixel buffer
+    std::vector<LabF>&       labImage,
     const std::vector<int>&  indexMatrix,
     const std::vector<PaletteEntry>& palette,
     const GradientData&      gradients,
@@ -94,19 +94,14 @@ void applyGradients(
 
     auto cpMap = buildChangePointMap(gradients.changePoints);
 
-    // Track which queue index was first assigned to each cluster pair
     std::map<std::pair<int,int>, uint32_t> boundaryFirstIdx;
     uint32_t nextQueueIdx = 0;
-
-    // We scan in the same order as the encoder (top→bottom, left→right)
-    // to reproduce the same queue assignment.
     std::map<std::pair<int,int>, bool> seen;
 
     for (int y = 0; y < height && nextQueueIdx < gradients.queue.size(); y++) {
         for (int x = 0; x < width && nextQueueIdx < gradients.queue.size(); x++) {
             int cA = indexMatrix[y * width + x];
 
-            // Check right neighbor
             if (x + 1 < width) {
                 int cB = indexMatrix[y * width + (x + 1)];
                 if (cA != cB) {
@@ -118,7 +113,6 @@ void applyGradients(
                 }
             }
 
-            // Check bottom neighbor
             if (y + 1 < height) {
                 int cB = indexMatrix[(y + 1) * width + x];
                 if (cA != cB) {
@@ -132,12 +126,6 @@ void applyGradients(
         }
     }
 
-    // ── Apply gradient blending at each boundary pixel ────────────────────────
-    // For each pixel, check all 4 neighbors. If the neighbor belongs to a
-    // different cluster, blend the two cluster colors across the transition zone
-    // defined by the descriptor's width and shape.
-
-    // Work on a copy so reads and writes don't interfere
     std::vector<LabF> output = labImage;
 
     for (int y = 0; y < height; y++) {
@@ -145,7 +133,6 @@ void applyGradients(
             int cA = indexMatrix[y * width + x];
             const PaletteEntry& pA = palette[cA];
 
-            // Collect all neighboring clusters and their descriptors
             int neighbors[4][2] = {{x+1,y},{x-1,y},{x,y+1},{x,y-1}};
             for (auto& nb : neighbors) {
                 int nx = nb[0], ny = nb[1];
@@ -160,27 +147,24 @@ void applyGradients(
                 if (qIdx >= gradients.queue.size()) continue;
                 const GradientDescriptor& desc = gradients.queue[qIdx];
 
-                int   halfW = widthPixels(desc.width);
+                int halfW = widthPixels(desc.width);
                 const PaletteEntry& pB = palette[cB];
 
-                // For each pixel in the transition zone, compute blend factor t
-                // based on distance from the boundary along the gradient direction.
+                // Blend along the line from current pixel toward neighbor
+                // No stored direction needed — derived from actual neighbor position
                 for (int d = -halfW; d <= halfW; d++) {
-                    int bx = x, by = y;
-
-                    // Move along the direction perpendicular to the boundary edge
-                    switch (desc.direction) {
-                        case 0: bx = x + d; break;             // horizontal
-                        case 1: by = y + d; break;             // vertical
-                        case 2: bx = x + d; by = y + d; break; // diag-left
-                        case 3: bx = x + d; by = y - d; break; // diag-right
+                    int bx, by;
+                    if (halfW == 0) {
+                        bx = x; by = y;
+                    } else {
+                        bx = x + (int)std::round((float)d * (nx - x) / halfW);
+                        by = y + (int)std::round((float)d * (ny - y) / halfW);
                     }
 
                     if (bx < 0 || bx >= width || by < 0 || by >= height) continue;
                     if (indexMatrix[by * width + bx] != cA &&
                         indexMatrix[by * width + bx] != cB) continue;
 
-                    // t=0 → color A, t=1 → color B
                     float t = (float)(d + halfW) / (float)(2 * halfW + 1);
                     t = applyShape(t, desc.shape);
 

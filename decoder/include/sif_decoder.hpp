@@ -105,6 +105,12 @@ public:
         }
         return result;
     }
+
+    void sync() {
+        // Discard any partially-read byte remaining in buffer
+        buffer   = 0;
+        bitCount = 0;
+    }
 };
 
 
