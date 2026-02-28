@@ -30,6 +30,18 @@ struct GradientDescriptor {
         }
         return d;
     }
+
+    uint8_t pack(GradientPrecision prec) const {
+        switch (prec) {
+            case GradientPrecision::BITS_2:
+                return shape & 0x03;
+            case GradientPrecision::BITS_4:
+                return ((shape & 0x03) << 2) | (direction & 0x03);
+            case GradientPrecision::BITS_6:
+            default:
+                return ((shape & 0x03) << 4) | ((direction & 0x03) << 2) | (width & 0x03);
+        }
+    }
 };
 
 struct ChangePoint {

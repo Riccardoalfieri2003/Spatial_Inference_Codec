@@ -5,103 +5,12 @@
 #include <vector>
 #include "VoxelGrid_mod.hpp" // For PaletteEntry/LabPixel types
 #include "GradientEncoder_mod.hpp"
+#include "Compression.hpp"
+#include <PaletteEntry.hpp>
+#include "GradientTypes.hpp"
 
-#include <map>
-#include <queue>
-#include <bitset>
-
-
-#include <fstream>   // For std::ofstream and std::ifstream
-#include <iostream>  // For std::cout
-#include <vector>    // For std::vector
-#include <string>    // For std::string
-#include <filesystem> // For creating directories (C++17 or later)
-#include <iomanip>
 
 /*
-
-#include <fstream>
-#include <cstdint>
-
-class BitWriter {
-    std::ofstream& out;
-    uint8_t buffer;   // Temporary storage for bits
-    int bitCount;     // How many bits are currently in the buffer
-
-public:
-    BitWriter(std::ofstream& f) : out(f), buffer(0), bitCount(0) {}
-
-    // value: the data to write
-    // numBits: how many bits of that data to actually use
-    void write(uint32_t value, int numBits) {
-        for (int i = numBits - 1; i >= 0; --i) {
-            // Extract the i-th bit from the value
-            bool bit = (value >> i) & 1;
-            
-            // Push it into our 8-bit buffer
-            buffer = (buffer << 1) | bit;
-            bitCount++;
-
-            // If we have a full byte (8 bits), write it to the file
-            if (bitCount == 8) {
-                out.put(static_cast<char>(buffer));
-                buffer = 0;
-                bitCount = 0;
-            }
-        }
-    }
-
-    // Very important: writes the last remaining bits
-    void flush() {
-        if (bitCount > 0) {
-            buffer <<= (8 - bitCount); // Move bits to the start of the byte
-            out.put(static_cast<char>(buffer));
-            buffer = 0;
-            bitCount = 0;
-        }
-    }
-};
-
-
-
-// Internal structure for Huffman Tree
-struct HuffmanNode {
-    int value;
-    unsigned freq;
-    HuffmanNode *left, *right;
-    HuffmanNode(int v, unsigned f) : value(v), freq(f), left(nullptr), right(nullptr) {}
-};
-
-
-
-
-#include <queue>
-#include <map>
-
-// Node for the Huffman Tree
-struct Node {
-    int id;
-    int freq;
-    Node *left, *right;
-    Node(int i, int f) : id(i), freq(f), left(nullptr), right(nullptr) {}
-};
-
-// Comparison for the priority queue
-struct Compare {
-    bool operator()(Node* l, Node* r) { return l->freq > r->freq; }
-};
-
-// Recursive function to build the code table
-void buildCodes(Node* root, std::string str, std::map<int, std::pair<uint32_t, int>>& huffmanTable) {
-    if (!root) return;
-    if (!root->left && !root->right) {
-        // Convert bit-string "101" to an integer 5 and length 3
-        huffmanTable[root->id] = { (uint32_t)std::bitset<32>(str).to_ulong(), (int)str.length() };
-    }
-    buildCodes(root->left, str + "0", huffmanTable);
-    buildCodes(root->right, str + "1", huffmanTable);
-}
-
 
 #include <PaletteEntry.hpp>
 
@@ -574,5 +483,259 @@ void saveSIF_claude(const std::string& path,
 
 
 */
+
+
+void saveSIF_v2(const std::string& path,
+                int width, int height,
+                const std::vector<PaletteEntry>& palette,
+                const std::vector<int>& indexMatrix,
+                const GradientData& gradients,
+                const std::vector<PaletteEntry>& residualPalette,
+                const std::vector<int>& residualIndexMatrix)
+{
+    std::ofstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file: " << path << "\n";
+        return;
+    }
+
+    // ── Helper: encode a palette + index matrix with RLE + Huffman ───────────
+    // Returns {rleStream, huffmanTable, maxRun, bitsPerIndex, rleStreamBits}
+    // so we can reuse for both main and residual sections.
+    struct RLESymbol { int value; int runLength; };
+
+    auto encodeSection = [&](
+        const std::vector<PaletteEntry>& pal,
+        const std::vector<int>& idxMatrix,
+        std::vector<RLESymbol>& rleStream,
+        std::map<int, std::pair<uint32_t,int>>& huffTable,
+        int& maxRun, int& bitsPerIndex)
+    {
+        // Palette
+        uint16_t palSize = (uint16_t)pal.size();
+        file.write((char*)&palSize, 2);
+        for (const auto& p : pal) {
+            int8_t L = (int8_t)std::round(p.L);
+            int8_t a = (int8_t)std::round(p.a);
+            int8_t b = (int8_t)std::round(p.b);
+            int8_t e = (int8_t)std::floor(p.error);
+            file.write((char*)&L, 1); file.write((char*)&a, 1);
+            file.write((char*)&b, 1); file.write((char*)&e, 1);
+        }
+
+        // Bit width
+        bitsPerIndex = 1;
+        while ((1 << bitsPerIndex) < palSize) bitsPerIndex++;
+
+        // RLE
+        if (!idxMatrix.empty()) {
+            int cur = idxMatrix[0], run = 1;
+            for (size_t i = 1; i < idxMatrix.size(); i++) {
+                if (idxMatrix[i] == cur) { run++; }
+                else { rleStream.push_back({cur, run}); cur = idxMatrix[i]; run = 1; }
+            }
+            rleStream.push_back({cur, run});
+        }
+
+        // Huffman
+        maxRun = 1;
+        for (auto& s : rleStream) maxRun = std::max(maxRun, s.runLength);
+
+        auto pairKey = [&](int value, int run) {
+            return value * (maxRun + 1) + (run - 1);
+        };
+
+        std::map<int,int> freq;
+        for (auto& s : rleStream) freq[pairKey(s.value, s.runLength)]++;
+
+        if (freq.size() == 1) {
+            huffTable[freq.begin()->first] = {0, 1};
+        } else {
+            std::priority_queue<Node*, std::vector<Node*>, Compare> pq;
+            for (auto const& [id, f] : freq) pq.push(new Node(id, f));
+            while (pq.size() > 1) {
+                Node* left  = pq.top(); pq.pop();
+                Node* right = pq.top(); pq.pop();
+                Node* top   = new Node(-1, left->freq + right->freq);
+                top->left = left; top->right = right;
+                pq.push(top);
+            }
+            buildCodes(pq.top(), "", huffTable);
+        }
+
+        // Write metadata + Huffman table
+        file.write((char*)&bitsPerIndex, 1);
+        file.write((char*)&maxRun,       4);
+
+        uint16_t tableEntries = (uint16_t)huffTable.size();
+        file.write((char*)&tableEntries, 2);
+        for (auto const& [key, code] : huffTable) {
+            uint8_t len = (uint8_t)code.second;
+            file.write((char*)&key,        4);
+            file.write((char*)&len,        1);
+            file.write((char*)&code.first, 4);
+        }
+
+        // Write RLE + Huffman bitstream
+        uint32_t rleCount = (uint32_t)rleStream.size();
+        file.write((char*)&rleCount, 4);
+
+        BitWriter bw(file);
+        for (auto& s : rleStream) {
+            int key = pairKey(s.value, s.runLength);
+            auto& [code, len] = huffTable[key];
+            bw.write(code, len);
+        }
+        bw.flush();
+    };
+
+    // ── 1. Header ────────────────────────────────────────────────────────────
+    uint32_t w = width, h = height;
+    file.write((char*)&w, 4);
+    file.write((char*)&h, 4);
+
+    // ── 2. Main palette + index matrix ───────────────────────────────────────
+    std::vector<RLESymbol> mainRLE;
+    std::map<int, std::pair<uint32_t,int>> mainHuff;
+    int mainMaxRun = 1, mainBitsPerIndex = 1;
+    encodeSection(palette, indexMatrix, mainRLE, mainHuff, mainMaxRun, mainBitsPerIndex);
+
+    // ── 3. Gradient section ───────────────────────────────────────────────────
+    int precBits = (int)gradients.precision;
+    uint8_t precisionByte = (uint8_t)gradients.precision;
+    file.write((char*)&precisionByte, 1);
+
+    uint32_t queueSize = (uint32_t)gradients.queue.size();
+    file.write((char*)&queueSize, 4);
+
+    BitWriter bwGrad(file);
+    for (const auto& desc : gradients.queue)
+        bwGrad.write(desc.pack(gradients.precision), precBits);
+    bwGrad.flush();
+
+    uint32_t cpCount = (uint32_t)gradients.changePoints.size();
+    file.write((char*)&cpCount, 4);
+    for (const auto& cp : gradients.changePoints) {
+        file.write((char*)&cp.x,        2);
+        file.write((char*)&cp.y,        2);
+        file.write((char*)&cp.queueIdx, 4);
+    }
+
+    // ── 4. Residual section ───────────────────────────────────────────────────
+    uint8_t residualMagic = 0xFE;
+    file.write((char*)&residualMagic, 1);
+
+    std::vector<RLESymbol> resRLE;
+    std::map<int, std::pair<uint32_t,int>> resHuff;
+    int resMaxRun = 1, resBitsPerIndex = 1;
+    encodeSection(residualPalette, residualIndexMatrix, resRLE, resHuff, resMaxRun, resBitsPerIndex);
+
+    file.close();
+
+    // ── Statistics ────────────────────────────────────────────────────────────
+    size_t fileSize = std::filesystem::file_size(path);
+    int totalPixels = width * height;
+
+    // Main section sizes
+    size_t headerBytes      = 4 + 4;
+    size_t mainPalBytes     = 2 + palette.size() * 4;
+    size_t mainMetaBytes    = 1 + 4;
+    size_t mainHuffTblBytes = 2 + mainHuff.size() * (4+1+4);
+    size_t mainRleHdrBytes  = 4;
+
+    auto pairKeyMain = [&](int value, int run) {
+        return value * (mainMaxRun + 1) + (run - 1);
+    };
+    size_t mainRleBits = 0;
+    for (auto& s : mainRLE) mainRleBits += mainHuff.at(pairKeyMain(s.value, s.runLength)).second;
+    size_t mainRleBytes = (mainRleBits + 7) / 8;
+
+    // Gradient section sizes
+    size_t gradPrecBytes  = 1;
+    size_t gradQueueBytes = 4 + ((gradients.queue.size() * precBits + 7) / 8);
+    size_t gradCPBytes    = 4 + gradients.changePoints.size() * (2+2+4);
+    size_t gradTotalBytes = gradPrecBytes + gradQueueBytes + gradCPBytes;
+
+    // Residual section sizes
+    size_t resMagicBytes   = 1;
+    size_t resPalBytes     = 2 + residualPalette.size() * 4;
+    size_t resMetaBytes    = 1 + 4;
+    size_t resHuffTblBytes = 2 + resHuff.size() * (4+1+4);
+    size_t resRleHdrBytes  = 4;
+
+    auto pairKeyRes = [&](int value, int run) {
+        return value * (resMaxRun + 1) + (run - 1);
+    };
+    size_t resRleBits = 0;
+    for (auto& s : resRLE) resRleBits += resHuff.at(pairKeyRes(s.value, s.runLength)).second;
+    size_t resRleBytes    = (resRleBits + 7) / 8;
+    size_t resTotalBytes  = resMagicBytes + resPalBytes + resMetaBytes
+                          + resHuffTblBytes + resRleHdrBytes + resRleBytes;
+
+    float bpp = (float)(fileSize * 8) / totalPixels;
+
+    auto pct = [&](size_t bytes) {
+        return (float)bytes * 100.0f / (float)fileSize;
+    };
+    auto bitsPerPx = [&](size_t bytes) {
+        return (float)(bytes * 8) / (float)totalPixels;
+    };
+
+    std::cout << "\n|------------------------------------------------------|\n";
+    std::cout << "|              SIF File Breakdown                     |\n";
+    std::cout << "|------------------------------------------------------|\n";
+    std::cout << "| Section            | Bytes   |  bpp   |   % file  |\n";
+    std::cout << "|------------------------------------------------------|\n";
+
+    auto row = [&](const std::string& name, size_t bytes) {
+        std::cout << "| " << std::left  << std::setw(19) << name
+                  << "| "  << std::right << std::setw(7)  << bytes
+                  << " | "              << std::setw(5)   << std::fixed
+                                        << std::setprecision(3) << bitsPerPx(bytes)
+                  << "  | "             << std::setw(7)   << std::setprecision(2)
+                                        << pct(bytes) << "%  |\n";
+    };
+
+    row("Header",            headerBytes);
+    row("Main palette",      mainPalBytes);
+    row("Main Huff meta",    mainMetaBytes);
+    row("Main Huff table",   mainHuffTblBytes);
+    row("Main RLE header",   mainRleHdrBytes);
+    row("Main RLE stream",   mainRleBytes);
+    row("Gradient section",  gradTotalBytes);
+    row("  - precision",     gradPrecBytes);
+    row("  - queue",         gradQueueBytes);
+    row("  - change pts",    gradCPBytes);
+    row("Residual section",  resTotalBytes);
+    row("  - magic byte",    resMagicBytes);
+    row("  - palette",       resPalBytes);
+    row("  - Huff meta",     resMetaBytes);
+    row("  - Huff table",    resHuffTblBytes);
+    row("  - RLE header",    resRleHdrBytes);
+    row("  - RLE stream",    resRleBytes);
+    std::cout << "|------------------------------------------------------|\n";
+    row("TOTAL",             fileSize);
+    std::cout << "|------------------------------------------------------|\n";
+
+    std::cout << "\n--- Per-element bit costs ---\n";
+    std::cout << "Palette entry:       " << 4*8       << " bits (L:8 a:8 b:8 e:8)\n";
+    std::cout << "Huffman table entry: " << (4+1+4)*8 << " bits (key:32 len:8 code:32)\n";
+    std::cout << "Gradient descriptor: " << precBits  << " bits\n";
+    std::cout << "Change point:        " << (2+2+4)*8 << " bits (x:16 y:16 idx:32)\n";
+    std::cout << "Avg main RLE symbol: " << std::fixed << std::setprecision(2)
+              << (mainRleBits / (float)mainRLE.size()) << " bits (Huffman coded)\n";
+    std::cout << "Avg res  RLE symbol: " << std::fixed << std::setprecision(2)
+              << (resRleBits  / (float)resRLE.size())  << " bits (Huffman coded)\n";
+
+    std::cout << "\n--- Summary ---\n";
+    std::cout << "Image:           " << width << "x" << height
+              << " (" << totalPixels << " pixels)\n";
+    std::cout << "Original RGB:    " << (totalPixels * 3) / 1024 << " KB\n";
+    std::cout << "SIF File:        " << fileSize / 1024          << " KB\n";
+    std::cout << "Bits Per Pixel:  " << bpp                      << " bpp\n";
+    std::cout << "Compression:     " << (float)(totalPixels*24) / (fileSize*8) << ":1\n";
+    std::cout << "Location: "        << std::filesystem::absolute(path)        << "\n";
+}
+
 
 #endif

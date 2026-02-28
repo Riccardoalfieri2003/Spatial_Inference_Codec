@@ -350,6 +350,7 @@ int main(int argc, char* argv[]) {
     system("start out_residual_quantized.png");
 
 
+    saveSIF_v2("output_claude.sif", width, height, palette, indexMatrix, gradients, residualPalette, residualIndexMatrix);
 
     
 
