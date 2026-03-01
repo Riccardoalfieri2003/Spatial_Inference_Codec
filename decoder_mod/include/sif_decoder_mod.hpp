@@ -171,23 +171,6 @@ SIFData loadSIF(const std::string& path) {
         file.read((char*)&palSize, 2);
         pal.resize(palSize);
 
-        /*
-        for (auto& p : pal) {
-            
-            int8_t L, a, b, e;
-            file.read((char*)&L, 1); file.read((char*)&a, 1);
-            file.read((char*)&b, 1); file.read((char*)&e, 1);
-            p.L = (float)L; p.a = (float)a;
-            p.b = (float)b; p.error = (float)e;
-            
-
-            int8_t L, a, b;
-            file.read((char*)&L, 1); file.read((char*)&a, 1);
-            file.read((char*)&b, 1);
-            p.L = (float)L; p.a = (float)a; p.b = (float)b;
-            p.error = 0.0f;
-        }*/
-
         for (auto& p : pal) {
             uint16_t L, a, b;
             file.read((char*)&L, 2);

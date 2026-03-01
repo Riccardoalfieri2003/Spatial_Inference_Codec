@@ -412,20 +412,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    /*
-    std::cout << "gradients.valid=" << data.gradients.valid 
-          << " queue.size=" << data.gradients.queue.size()
-          << " changePoints.size=" << data.gradients.changePoints.size() << "\n";
-    std::cout << "residualPalette.size=" << data.residualPalette.size() << "\n";
-    std::cout << "residualIndexMatrix.size=" << data.residualIndexMatrix.size() << "\n";
-    */
-
-
-    for (int i = 0; i < 5; i++)
-    std::cout << "DEC palette[" << i << "] L=" << data.palette[i].L 
-              << " a=" << data.palette[i].a << " b=" << data.palette[i].b << "\n";
-    std::cout << "DEC indexMatrix[0]=" << data.indexMatrix[0] << "\n";
-
     int totalPixels = data.width * data.height;
 
     // ── Step 1: Quantized + main gradients ────────────────────────────────────
@@ -452,8 +438,29 @@ int main(int argc, char* argv[]) {
             << " a=" << data.palette[0].a << " b=" << data.palette[0].b << "\n";
     std::cout << "indexMatrix[0]=" << data.indexMatrix[0] << "\n";
 
+
+    // Print indexMatrix values around pixel 0 in a 5x5 region
+    std::cout << "indexMatrix patch around (0,0):\n";
+    for (int y = 0; y < 5; y++) {
+        for (int x = 0; x < 5; x++)
+            std::cout << data.indexMatrix[y * data.width + x] << " ";  // or data.indexMatrix
+        std::cout << "\n";
+    }
+
+
+
     applyGradients(labImage, data.indexMatrix, data.palette,
                    data.gradients, data.width, data.height);
+
+    
+    std::cout << "\n--- DECODER FINAL STATE ---\n";
+    for (int i = 0; i < 5; i++)
+        std::cout << "DEC final palette[" << i << "] L=" << data.palette[i].L 
+                << " a=" << data.palette[i].a << " b=" << data.palette[i].b << "\n";
+    std::cout << "DEC gradients queue[0]: shape=" << (int)data.gradients.queue[0].shape
+            << " width=" << (int)data.gradients.queue[0].width << "\n";
+    std::cout << "DEC labImage[0]: L=" << labImage[0].L
+            << " a=" << labImage[0].a << " b=" << labImage[0].b << "\n";
 
 
     // First 5 pixels after applyGradients
@@ -515,8 +522,8 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < totalPixels; i++) {
         finalImage[i] = {
             labImage[i].L + residualImage[i].L + residualImage2[i].L + residualImage3[i].L,
-            labImage[i].a + residualImage[i].a + residualImage2[i].a + residualImage3[i].L,
-            labImage[i].b + residualImage[i].b + residualImage2[i].b + residualImage3[i].L
+            labImage[i].a + residualImage[i].a + residualImage2[i].a + residualImage3[i].a,
+            labImage[i].b + residualImage[i].b + residualImage2[i].b + residualImage3[i].b
         };
     }
 
@@ -532,145 +539,6 @@ int main(int argc, char* argv[]) {
         //system(("start " + name).c_str());
     };
 
-    //saveAndOpen(labImage,       "debug_quantized_grad.png");
-    //saveAndOpen(residualImage,  "debug_residual1_grad.png", 50.0f);
-    //saveAndOpen(residualImage2, "debug_residual2_grad.png", 50.0f);
-    //saveAndOpen(finalImage,     "debug_full_reconstruction.png");
-
-    /*
-    // ── Step 6: Sphere-constrained reconstruction ─────────────────────────────
-    std::vector<LabF> sampledImage(totalPixels);
-    bool random = false;
-
-    if (random) {
-        std::mt19937 rng(42);
-        std::normal_distribution<float> gauss(0.0f, 1.0f);
-
-        for (int i = 0; i < totalPixels; i++) {
-            LabF  Q  = labImage[i];
-            LabF  QR = finalImage[i];
-            float e1 = data.palette[data.indexMatrix[i]].error;
-            float e2 = data.residualPalette2.empty()
-                     ? data.residualPalette[data.residualIndexMatrix[i]].error
-                     : data.residualPalette2[data.residualIndexMatrix2[i]].error;
-
-            if (e2 < 1e-4f) { sampledImage[i] = QR; continue; }
-
-            const int maxAttempts = 32;
-            bool found = false;
-            LabF candidate;
-            for (int attempt = 0; attempt < maxAttempts; attempt++) {
-                float dL = gauss(rng), da = gauss(rng), db = gauss(rng);
-                float norm = std::sqrt(dL*dL + da*da + db*db);
-                if (norm < 1e-6f) continue;
-                candidate = { QR.L + e2*dL/norm, QR.a + e2*da/norm, QR.b + e2*db/norm };
-                float dist = std::sqrt(
-                    (candidate.L-Q.L)*(candidate.L-Q.L) +
-                    (candidate.a-Q.a)*(candidate.a-Q.a) +
-                    (candidate.b-Q.b)*(candidate.b-Q.b));
-                if (dist <= e1) { found = true; break; }
-            }
-            sampledImage[i] = found ? candidate : QR;
-        }
-    } else {
-        for (int i = 0; i < totalPixels; i++) {
-            LabF  Q   = labImage[i];     // center of Sphere 1 (quantized + grad)
-            LabF  QR  = finalImage[i];   // center of Sphere 3 (Q + res1 + res2)
-            
-            float e1  = data.palette[data.indexMatrix[i]].error;
-            float e2  = data.residualPalette.empty()  ? 0.0f 
-                    : data.residualPalette[data.residualIndexMatrix[i]].error;
-            float e3  = data.residualPalette2.empty() ? 0.0f 
-                    : data.residualPalette2[data.residualIndexMatrix2[i]].error;
-
-            // ── Sphere 1: center=Q, radius=e1 ────────────────────────────────────
-            // ── Sphere 2: center=Q+res1+grad,  radius=e2 ─────────────────────────
-            // ── Sphere 3: center=Q+res1+res2+grad, radius=e3 ─────────────────────
-
-            // Step A: find the closest point on surface of Sphere 2 toward Q
-            // This gives us the best point on Sphere 2 that agrees with Sphere 1
-            LabF center2 = {
-                Q.L + residualImage[i].L,
-                Q.a + residualImage[i].a,
-                Q.b + residualImage[i].b
-            };
-
-            LabF p2;  // best point on surface of Sphere 2
-            if (e2 < 1e-4f) {
-                p2 = center2;
-            } else {
-                float dL = Q.L - center2.L;
-                float da = Q.a - center2.a;
-                float db = Q.b - center2.b;
-                float norm = std::sqrt(dL*dL + da*da + db*db);
-                if (norm < 1e-6f) {
-                    p2 = center2;
-                } else {
-                    p2 = {
-                        center2.L + e2 * dL / norm,
-                        center2.a + e2 * da / norm,
-                        center2.b + e2 * db / norm
-                    };
-                }
-            }
-
-            // Check p2 is inside Sphere 1 — if not, clamp to Sphere 1 surface
-            {
-                float dL = p2.L - Q.L;
-                float da = p2.a - Q.a;
-                float db = p2.b - Q.b;
-                float dist = std::sqrt(dL*dL + da*da + db*db);
-                if (dist > e1 && dist > 1e-6f) {
-                    p2 = {
-                        Q.L + e1 * dL / dist,
-                        Q.a + e1 * da / dist,
-                        Q.b + e1 * db / dist
-                    };
-                }
-            }
-
-            // Step B: find the closest point on surface of Sphere 3 toward p2
-            // p2 is now our target — the best constrained estimate from Sphere 2
-            if (e3 < 1e-4f) {
-                sampledImage[i] = QR;
-                continue;
-            }
-
-            float dL = p2.L - QR.L;
-            float da = p2.a - QR.a;
-            float db = p2.b - QR.b;
-            float norm = std::sqrt(dL*dL + da*da + db*db);
-
-            if (norm < 1e-6f) {
-                sampledImage[i] = QR;
-                continue;
-            }
-
-            LabF p3 = {
-                QR.L + e3 * dL / norm,
-                QR.a + e3 * da / norm,
-                QR.b + e3 * db / norm
-            };
-
-            // Final check: if p3 falls outside Sphere 1, fall back to p2
-            {
-                float dL2 = p3.L - Q.L;
-                float da2 = p3.a - Q.a;
-                float db2 = p3.b - Q.b;
-                float dist = std::sqrt(dL2*dL2 + da2*da2 + db2*db2);
-                sampledImage[i] = (dist <= e1) ? p3 : p2;
-            }
-        }
-    }
-
-    // ── Step 7: Convert Lab → RGB and save ────────────────────────────────────
-    std::vector<unsigned char> pixels(totalPixels * 3);
-    for (int i = 0; i < totalPixels; i++) {
-        ImageConverter::convertPixelLabToRGB(
-            sampledImage[i].L, sampledImage[i].a, sampledImage[i].b,
-            pixels[i*3], pixels[i*3+1], pixels[i*3+2]);
-    }
-    */
 
     // ── Step 7: Convert Lab → RGB and save ───────────────────────────────────
     std::vector<unsigned char> pixels(totalPixels * 3);
@@ -683,7 +551,7 @@ int main(int argc, char* argv[]) {
     // ── Step 8: Post-processing filter ───────────────────────────────────────
     // Choose one filter by setting the enum value
     enum class FilterMode { NONE, GAUSSIAN, BILATERAL, MEDIAN };
-    FilterMode filterMode = FilterMode::BILATERAL;  // ← change this to try different filters
+    FilterMode filterMode = FilterMode::NONE;  // ← change this to try different filters
 
     if (filterMode != FilterMode::NONE) {
         std::vector<unsigned char> filtered(totalPixels * 3);

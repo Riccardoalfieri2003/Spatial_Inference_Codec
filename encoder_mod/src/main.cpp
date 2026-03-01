@@ -18,6 +18,15 @@
 #include "GradientReconstruction_mod.hpp"
 #include "PaletteEntry.hpp"
 
+// ── Simulate float16 palette quantization (mirrors decoder precision) ─────
+auto quantizePalette = [](std::vector<PaletteEntry>& pal) {
+    for (auto& p : pal) {
+        p.L = halfToFloat(floatToHalf(p.L));
+        p.a = halfToFloat(floatToHalf(p.a));
+        p.b = halfToFloat(floatToHalf(p.b));
+    }
+};
+
 
 int main(int argc, char* argv[]) {
     // Check if the user provided enough arguments
@@ -94,6 +103,9 @@ int main(int argc, char* argv[]) {
         auto stats = cluster.getStats();
         palette.push_back({stats.centroid.L, stats.centroid.a, stats.centroid.b, stats.maxError});
     }
+
+    // After main palette is built:
+    quantizePalette(palette);
     
 
     // 3. Build the Index Matrix
@@ -194,6 +206,8 @@ int main(int argc, char* argv[]) {
         1.0f,   // changeThreshold — lower = more sensitive to gradient changes
         32       // segmentSize — smaller = more frequent updates along boundaries
     );
+    // After encodeGradients for residualGradients:
+    for (auto& desc : gradients.queue) desc.shape = 1;
 
     // Add this after applyGradients in BOTH encoder and decoder
     for (int i = 0; i < 5; i++) {
@@ -234,6 +248,9 @@ int main(int argc, char* argv[]) {
 
 
 
+
+
+
     // ══════════════════════════════════════════════════════════════════════════
     // RESIDUAL 1
     // ══════════════════════════════════════════════════════════════════════════
@@ -251,6 +268,17 @@ int main(int argc, char* argv[]) {
         int cIdx = indexMatrix[i];
         reconstructed[i] = { palette[cIdx].L, palette[cIdx].a, palette[cIdx].b };
     }
+
+
+    // Print indexMatrix values around pixel 0 in a 5x5 region
+    std::cout << "indexMatrix patch around (0,0):\n";
+    for (int y = 0; y < 5; y++) {
+        for (int x = 0; x < 5; x++)
+            std::cout << indexMatrix[y * width + x] << " ";  // or data.indexMatrix
+        std::cout << "\n";
+    }
+
+
     applyGradients(reconstructed, indexMatrix, palette, gradients, width, height);
 
     std::vector<LabPixelFlat> residualLab(width * height);
@@ -292,6 +320,14 @@ int main(int argc, char* argv[]) {
         });
     }
 
+    // After main palette is built:
+    quantizePalette(residualPalette);
+
+    // Encoder — after quantizePalette(residualPalette):
+    for (int i = 0; i < 5; i++)
+        std::cout << "ENC resPalette[" << i << "] L=" << residualPalette[i].L 
+                << " a=" << residualPalette[i].a << " b=" << residualPalette[i].b << "\n";
+
     // ── Build index matrix using scaled coords ────────────────────────────────
     std::vector<int> residualIndexMatrix(width * height);
     for (int i = 0; i < width * height; i++) {
@@ -312,6 +348,11 @@ int main(int argc, char* argv[]) {
         residualIndexMatrix, residualLab, width, height,
         GradientPrecision::BITS_2, 0.25f, 16
     );
+    // After encodeGradients for residualGradients2:
+    for (auto& desc : residualGradients.queue) desc.shape = 1;
+
+
+
 
     // ══════════════════════════════════════════════════════════════════════════
     // RESIDUAL 2
@@ -388,12 +429,22 @@ int main(int argc, char* argv[]) {
         residualIndexMatrix2[i] = residualResult2.voxelToClusterIdx[coord];
     }
 
+    // After main palette is built:
+    quantizePalette(residualPalette2);
+
+    // Encoder — after quantizePalette(residualPalette):
+for (int i = 0; i < 5; i++)
+    std::cout << "ENC resPalette2[" << i << "] L=" << residualPalette2[i].L 
+              << " a=" << residualPalette2[i].a << " b=" << residualPalette2[i].b << "\n";
+
     std::cout << "Residual 2 Clusters: " << residualPalette2.size() << std::endl;
 
     GradientData residualGradients2 = encodeGradients(
         residualIndexMatrix2, residualLab2, width, height,
         GradientPrecision::BITS_2, 0.25f, 16
     );
+    // After encodeGradients for residualGradients3:
+    for (auto& desc : residualGradients2.queue) desc.shape = 1; 
 
     std::vector<LabF> reconstructedRes2(width * height);
     for (int i = 0; i < width * height; i++) {
@@ -428,9 +479,9 @@ int main(int argc, char* argv[]) {
     // ── Compute residual 3 ────────────────────────────────────────────────────
     std::vector<LabPixelFlat> residualLab3(width * height);
     for (int i = 0; i < width * height; i++) {
-        float reconL = reconstructed[i].L + reconstructedRes1[i].L + reconstructedRes3[i].L;
-        float reconA = reconstructed[i].a + reconstructedRes1[i].a + reconstructedRes3[i].a;
-        float reconB = reconstructed[i].b + reconstructedRes1[i].b + reconstructedRes3[i].b;
+        float reconL = reconstructed[i].L + reconstructedRes1[i].L + reconstructedRes2[i].L;
+        float reconA = reconstructed[i].a + reconstructedRes1[i].a + reconstructedRes2[i].L;
+        float reconB = reconstructed[i].b + reconstructedRes1[i].b + reconstructedRes2[i].L;
         residualLab3[i] = {
             imgLabFlat[i].L - reconL,
             imgLabFlat[i].a - reconA,
@@ -481,12 +532,23 @@ int main(int argc, char* argv[]) {
         residualIndexMatrix3[i] = residualResult3.voxelToClusterIdx[coord];
     }
 
+    // After main palette is built:
+    quantizePalette(residualPalette3);
+
+    // Encoder — after quantizePalette(residualPalette):
+for (int i = 0; i < 5; i++)
+    std::cout << "ENC resPalette3[" << i << "] L=" << residualPalette3[i].L 
+              << " a=" << residualPalette3[i].a << " b=" << residualPalette3[i].b << "\n";
+
     std::cout << "Residual 3 Clusters: " << residualPalette3.size() << std::endl;
 
     GradientData residualGradients3 = encodeGradients(
         residualIndexMatrix3, residualLab3, width, height,
         GradientPrecision::BITS_2, 0.25f, 16
     );
+
+    // After encodeGradients for residualGradients3:
+    for (auto& desc : residualGradients3.queue) desc.shape = 1; 
 
     // ── Reconstruct residual 3 for visualization ──────────────────────────────
     std::vector<LabF> reconstructedRes3Final(width * height);
@@ -508,6 +570,15 @@ int main(int argc, char* argv[]) {
     }
     */
 
+    std::cout << "\n--- ENCODER FINAL STATE ---\n";
+    for (int i = 0; i < 5; i++)
+        std::cout << "ENC final palette[" << i << "] L=" << palette[i].L 
+                << " a=" << palette[i].a << " b=" << palette[i].b << "\n";
+    std::cout << "ENC gradients queue[0]: shape=" << (int)gradients.queue[0].shape
+            << " width=" << (int)gradients.queue[0].width << "\n";
+    std::cout << "ENC reconstructed[0]: L=" << reconstructed[0].L
+            << " a=" << reconstructed[0].a << " b=" << reconstructed[0].b << "\n";
+
     // ══════════════════════════════════════════════════════════════════════════
     // VISUALIZATION
     // ══════════════════════════════════════════════════════════════════════════
@@ -524,7 +595,7 @@ int main(int argc, char* argv[]) {
                 img[i].L + shiftL, img[i].a, img[i].b,
                 buf[i*3], buf[i*3+1], buf[i*3+2]);
         }
-        //stbi_write_png(filename.c_str(), width, height, 3, buf.data(), width * 3);
+        stbi_write_png(filename.c_str(), width, height, 3, buf.data(), width * 3);
         std::cout << "Saved: " << filename << "\n";
     };
 
@@ -547,9 +618,9 @@ int main(int argc, char* argv[]) {
     std::vector<LabF> fullRecon(width * height);
     for (int i = 0; i < width * height; i++) {
         fullRecon[i] = {
-            reconstructed[i].L + reconstructedRes1[i].L + reconstructedRes2[i].L,
-            reconstructed[i].a + reconstructedRes1[i].a + reconstructedRes2[i].a,
-            reconstructed[i].b + reconstructedRes1[i].b + reconstructedRes2[i].b
+            reconstructed[i].L + reconstructedRes1[i].L + reconstructedRes2[i].L + reconstructedRes3Final[i].L,
+            reconstructed[i].a + reconstructedRes1[i].a + reconstructedRes2[i].a + reconstructedRes3Final[i].a,
+            reconstructed[i].b + reconstructedRes1[i].b + reconstructedRes2[i].b + reconstructedRes3Final[i].b,
         };
     }
 
@@ -558,10 +629,10 @@ int main(int argc, char* argv[]) {
     for (int i = 0; i < width * height; i++)
         originalLabF[i] = { imgLabFlat[i].L, imgLabFlat[i].a, imgLabFlat[i].b };
 
-    saveLabImage(originalLabF,   "out_original.png");
-    saveLabImage(reconstructed,  "out_quantized_grad.png");
-    saveLabFlatImage(residualLab,  "out_residual1.png", 50.0f);
-    saveLabFlatImage(residualLab2, "out_residual2.png", 50.0f);
+    //saveLabImage(originalLabF,   "out_original.png");
+    //saveLabImage(reconstructed,  "out_quantized_grad.png");
+    //saveLabFlatImage(residualLab,  "out_residual1.png", 50.0f);
+    //saveLabFlatImage(residualLab2, "out_residual2.png", 50.0f);
     saveLabImage(fullRecon,      "out_full_reconstruction.png");
 
     // ══════════════════════════════════════════════════════════════════════════

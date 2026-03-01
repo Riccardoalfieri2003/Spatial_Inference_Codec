@@ -61,6 +61,6 @@ struct GradientData {
     GradientPrecision precision;
     std::vector<GradientDescriptor> queue;
     std::vector<ChangePoint> changePoints;
-    bool valid = false;
+    bool valid = true;
 };
 

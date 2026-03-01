@@ -98,9 +98,15 @@ def plot_codec_comparison(original_path, reconstructed_path, save_path='codec_re
 
 # Usage
 
+
 plot_codec_comparison(
     r"C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png",
-    r"C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\build\\output_claude.sif_reconstructed.png" )
+    r"C:\Users\rical\OneDrive\Desktop\Spatial_Inference_Codec\build\output_claude.sif_reconstructed.png" )
+
+plot_codec_comparison(
+    r"C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png",
+    r"C:\Users\rical\OneDrive\Desktop\Spatial_Inference_Codec\build\out_full_reconstruction.png" )
+
 
 """compare_images(
     r"C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png",
