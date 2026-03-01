@@ -21,7 +21,7 @@
 
 int main(int argc, char* argv[]) {
     // Check if the user provided enough arguments
-    if (argc < 7) {
+    if (argc < 9) {
         std::cerr << "Usage: " << argv[0] 
                 << " <epsilon> <max_steps> <epsilon_res> <max_steps_res>" << std::endl;
         return 1;
@@ -36,8 +36,8 @@ int main(int argc, char* argv[]) {
               << " and Max Steps: " << maxStepsFromRoot << std::endl;
 
     // ... your image loading code ...
-    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
-    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
     
 
     int width, height, channels;
@@ -240,11 +240,12 @@ int main(int argc, char* argv[]) {
 
     float epsilonRes      = std::stof(argv[3]);
     int   maxStepsRes     = std::stoi(argv[4]);
+    float residualScale   = 1.0f;  // ← tune this: higher = finer clustering of residuals
 
     std::cout << "\nRunning Residual 1 Encoder with Epsilon: " << epsilonRes
-              << " and Max Steps: " << maxStepsRes << std::endl;
+              << " Max Steps: " << maxStepsRes 
+              << " Scale: " << residualScale << std::endl;
 
-    // ── Reconstruct quantized+gradient image ──────────────────────────────────
     std::vector<LabF> reconstructed(width * height);
     for (int i = 0; i < width * height; i++) {
         int cIdx = indexMatrix[i];
@@ -252,22 +253,6 @@ int main(int argc, char* argv[]) {
     }
     applyGradients(reconstructed, indexMatrix, palette, gradients, width, height);
 
-    // First 5 pixels after applyGradients
-    for (int i = 0; i < 5; i++)
-        std::cout << "POST_GRAD pixel[" << i << "] L=" << imgLabFlat[i].L  // or reconstructed[i]
-                << " a=" << imgLabFlat[i].a << " b=" << imgLabFlat[i].b << "\n";
-
-    // Also print the change points and queue first entry
-    std::cout << "gradient queue[0]: shape=" << (int)gradients.queue[0].shape  // or data.gradients
-            << " dir=" << (int)gradients.queue[0].direction
-            << " width=" << (int)gradients.queue[0].width << "\n";
-
-    std::cout << "indexMatrix around pixel 0: ";
-    for (int i = 0; i < 10; i++)
-        std::cout << indexMatrix[i] << " ";  // or data.indexMatrix[i]
-    std::cout << "\n";
-
-    // ── Compute residual 1 ────────────────────────────────────────────────────
     std::vector<LabPixelFlat> residualLab(width * height);
     for (int i = 0; i < width * height; i++) {
         residualLab[i] = {
@@ -277,39 +262,52 @@ int main(int argc, char* argv[]) {
         };
     }
 
-    // ── Voxelize + cluster residual 1 ─────────────────────────────────────────
+    // ── Voxelize residual 1 in scaled space ───────────────────────────────────
     VoxelMap residualGrid;
     for (int i = 0; i < width * height; i++) {
+        float sL = residualLab[i].L * residualScale;
+        float sA = residualLab[i].a * residualScale;
+        float sB = residualLab[i].b * residualScale;
         VoxelCoord coord = {
-            static_cast<int>(std::floor(residualLab[i].L / epsilonRes)),
-            static_cast<int>(std::floor(residualLab[i].a / epsilonRes)),
-            static_cast<int>(std::floor(residualLab[i].b / epsilonRes))
+            static_cast<int>(std::floor(sL / epsilonRes)),
+            static_cast<int>(std::floor(sA / epsilonRes)),
+            static_cast<int>(std::floor(sB / epsilonRes))
         };
-        residualGrid[coord].addPixel({ residualLab[i].L, residualLab[i].a, residualLab[i].b });
+        // Add the scaled values so the centroid is in scaled space
+        residualGrid[coord].addPixel({ sL, sA, sB });
     }
     std::cout << "\n--- Residual 1 Voxel Grid: " << residualGrid.size() << " voxels ---" << std::endl;
 
     ClusteringResult residualResult = Clusterer::run(residualGrid, maxStepsRes);
 
+    // ── Build palette: scale centroids back to original space ─────────────────
     std::vector<PaletteEntry> residualPalette;
     for (const auto& cluster : residualResult.clusters) {
         auto stats = cluster.getStats();
-        residualPalette.push_back({ stats.centroid.L, stats.centroid.a, stats.centroid.b, stats.maxError });
+        residualPalette.push_back({
+            stats.centroid.L / residualScale,
+            stats.centroid.a / residualScale,
+            stats.centroid.b / residualScale,
+            stats.maxError   / residualScale
+        });
     }
 
+    // ── Build index matrix using scaled coords ────────────────────────────────
     std::vector<int> residualIndexMatrix(width * height);
     for (int i = 0; i < width * height; i++) {
+        float sL = residualLab[i].L * residualScale;
+        float sA = residualLab[i].a * residualScale;
+        float sB = residualLab[i].b * residualScale;
         VoxelCoord coord = {
-            static_cast<int>(std::floor(residualLab[i].L / epsilonRes)),
-            static_cast<int>(std::floor(residualLab[i].a / epsilonRes)),
-            static_cast<int>(std::floor(residualLab[i].b / epsilonRes))
+            static_cast<int>(std::floor(sL / epsilonRes)),
+            static_cast<int>(std::floor(sA / epsilonRes)),
+            static_cast<int>(std::floor(sB / epsilonRes))
         };
         residualIndexMatrix[i] = residualResult.voxelToClusterIdx[coord];
     }
 
     std::cout << "Residual 1 Clusters: " << residualPalette.size() << std::endl;
 
-    // ── Encode gradients on residual 1 ───────────────────────────────────────
     GradientData residualGradients = encodeGradients(
         residualIndexMatrix, residualLab, width, height,
         GradientPrecision::BITS_2, 0.25f, 16
@@ -319,13 +317,15 @@ int main(int argc, char* argv[]) {
     // RESIDUAL 2
     // ══════════════════════════════════════════════════════════════════════════
 
-    float epsilonRes2   = std::stof(argv[5]);
-    int   maxStepsRes2  = std::stoi(argv[6]);
+    float epsilonRes2    = std::stof(argv[5]);
+    int   maxStepsRes2   = std::stoi(argv[6]);
+    // float residualScale2 = residualScale * 2.0f;  // scale even more for second residual
+    float residualScale2 = residualScale * 1.0f;  // scale even more for second residual
 
     std::cout << "\nRunning Residual 2 Encoder with Epsilon: " << epsilonRes2
-              << " and Max Steps: " << maxStepsRes2 << std::endl;
+              << " Max Steps: " << maxStepsRes2
+              << " Scale: " << residualScale2 << std::endl;
 
-    // ── Reconstruct residual1+gradient image ──────────────────────────────────
     std::vector<LabF> reconstructedRes1(width * height);
     for (int i = 0; i < width * height; i++) {
         int cIdx = residualIndexMatrix[i];
@@ -333,7 +333,6 @@ int main(int argc, char* argv[]) {
     }
     applyGradients(reconstructedRes1, residualIndexMatrix, residualPalette, residualGradients, width, height);
 
-    // ── Compute residual 2 (original - quantized+grad - residual1+grad) ───────
     std::vector<LabPixelFlat> residualLab2(width * height);
     for (int i = 0; i < width * height; i++) {
         float reconL = reconstructed[i].L + reconstructedRes1[i].L;
@@ -346,51 +345,168 @@ int main(int argc, char* argv[]) {
         };
     }
 
-    // ── Voxelize + cluster residual 2 ─────────────────────────────────────────
+    // ── Voxelize residual 2 in scaled space ───────────────────────────────────
     VoxelMap residualGrid2;
     for (int i = 0; i < width * height; i++) {
+        float sL = residualLab2[i].L * residualScale2;
+        float sA = residualLab2[i].a * residualScale2;
+        float sB = residualLab2[i].b * residualScale2;
         VoxelCoord coord = {
-            static_cast<int>(std::floor(residualLab2[i].L / epsilonRes2)),
-            static_cast<int>(std::floor(residualLab2[i].a / epsilonRes2)),
-            static_cast<int>(std::floor(residualLab2[i].b / epsilonRes2))
+            static_cast<int>(std::floor(sL / epsilonRes2)),
+            static_cast<int>(std::floor(sA / epsilonRes2)),
+            static_cast<int>(std::floor(sB / epsilonRes2))
         };
-        residualGrid2[coord].addPixel({ residualLab2[i].L, residualLab2[i].a, residualLab2[i].b });
+        residualGrid2[coord].addPixel({ sL, sA, sB });
     }
     std::cout << "\n--- Residual 2 Voxel Grid: " << residualGrid2.size() << " voxels ---" << std::endl;
 
     ClusteringResult residualResult2 = Clusterer::run(residualGrid2, maxStepsRes2);
 
+    // ── Build palette: scale centroids back to original space ─────────────────
     std::vector<PaletteEntry> residualPalette2;
     for (const auto& cluster : residualResult2.clusters) {
         auto stats = cluster.getStats();
-        residualPalette2.push_back({ stats.centroid.L, stats.centroid.a, stats.centroid.b, stats.maxError });
+        residualPalette2.push_back({
+            stats.centroid.L / residualScale2,
+            stats.centroid.a / residualScale2,
+            stats.centroid.b / residualScale2,
+            stats.maxError   / residualScale2
+        });
     }
 
+    // ── Build index matrix using scaled coords ────────────────────────────────
     std::vector<int> residualIndexMatrix2(width * height);
     for (int i = 0; i < width * height; i++) {
+        float sL = residualLab2[i].L * residualScale2;
+        float sA = residualLab2[i].a * residualScale2;
+        float sB = residualLab2[i].b * residualScale2;
         VoxelCoord coord = {
-            static_cast<int>(std::floor(residualLab2[i].L / epsilonRes2)),
-            static_cast<int>(std::floor(residualLab2[i].a / epsilonRes2)),
-            static_cast<int>(std::floor(residualLab2[i].b / epsilonRes2))
+            static_cast<int>(std::floor(sL / epsilonRes2)),
+            static_cast<int>(std::floor(sA / epsilonRes2)),
+            static_cast<int>(std::floor(sB / epsilonRes2))
         };
         residualIndexMatrix2[i] = residualResult2.voxelToClusterIdx[coord];
     }
 
     std::cout << "Residual 2 Clusters: " << residualPalette2.size() << std::endl;
 
-    // ── Encode gradients on residual 2 ───────────────────────────────────────
     GradientData residualGradients2 = encodeGradients(
         residualIndexMatrix2, residualLab2, width, height,
         GradientPrecision::BITS_2, 0.25f, 16
     );
 
-    // ── Reconstruct residual 2 for visualization ──────────────────────────────
     std::vector<LabF> reconstructedRes2(width * height);
     for (int i = 0; i < width * height; i++) {
         int cIdx = residualIndexMatrix2[i];
         reconstructedRes2[i] = { residualPalette2[cIdx].L, residualPalette2[cIdx].a, residualPalette2[cIdx].b };
     }
     applyGradients(reconstructedRes2, residualIndexMatrix2, residualPalette2, residualGradients2, width, height);
+
+
+
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // RESIDUAL 3
+    // ══════════════════════════════════════════════════════════════════════════
+
+    float epsilonRes3    = std::stof(argv[7]);
+    int   maxStepsRes3   = std::stoi(argv[8]);
+    float residualScale3 = residualScale2 * 1.0f;  // 16x scaling for third residual
+
+    std::cout << "\nRunning Residual 3 Encoder with Epsilon: " << epsilonRes3
+              << " Max Steps: " << maxStepsRes3
+              << " Scale: " << residualScale3 << std::endl;
+
+    // ── Reconstruct residual2+gradient image ──────────────────────────────────
+    std::vector<LabF> reconstructedRes3(width * height);
+    for (int i = 0; i < width * height; i++) {
+        int cIdx = residualIndexMatrix2[i];
+        reconstructedRes3[i] = { residualPalette2[cIdx].L, residualPalette2[cIdx].a, residualPalette2[cIdx].b };
+    }
+    applyGradients(reconstructedRes3, residualIndexMatrix2, residualPalette2, residualGradients2, width, height);
+
+    // ── Compute residual 3 ────────────────────────────────────────────────────
+    std::vector<LabPixelFlat> residualLab3(width * height);
+    for (int i = 0; i < width * height; i++) {
+        float reconL = reconstructed[i].L + reconstructedRes1[i].L + reconstructedRes3[i].L;
+        float reconA = reconstructed[i].a + reconstructedRes1[i].a + reconstructedRes3[i].a;
+        float reconB = reconstructed[i].b + reconstructedRes1[i].b + reconstructedRes3[i].b;
+        residualLab3[i] = {
+            imgLabFlat[i].L - reconL,
+            imgLabFlat[i].a - reconA,
+            imgLabFlat[i].b - reconB
+        };
+    }
+
+    // ── Voxelize residual 3 in scaled space ───────────────────────────────────
+    VoxelMap residualGrid3;
+    for (int i = 0; i < width * height; i++) {
+        float sL = residualLab3[i].L * residualScale3;
+        float sA = residualLab3[i].a * residualScale3;
+        float sB = residualLab3[i].b * residualScale3;
+        VoxelCoord coord = {
+            static_cast<int>(std::floor(sL / epsilonRes3)),
+            static_cast<int>(std::floor(sA / epsilonRes3)),
+            static_cast<int>(std::floor(sB / epsilonRes3))
+        };
+        residualGrid3[coord].addPixel({ sL, sA, sB });
+    }
+    std::cout << "\n--- Residual 3 Voxel Grid: " << residualGrid3.size() << " voxels ---" << std::endl;
+
+    ClusteringResult residualResult3 = Clusterer::run(residualGrid3, maxStepsRes3);
+
+    // ── Build palette: scale centroids back to original space ─────────────────
+    std::vector<PaletteEntry> residualPalette3;
+    for (const auto& cluster : residualResult3.clusters) {
+        auto stats = cluster.getStats();
+        residualPalette3.push_back({
+            stats.centroid.L / residualScale3,
+            stats.centroid.a / residualScale3,
+            stats.centroid.b / residualScale3,
+            stats.maxError   / residualScale3
+        });
+    }
+
+    // ── Build index matrix using scaled coords ────────────────────────────────
+    std::vector<int> residualIndexMatrix3(width * height);
+    for (int i = 0; i < width * height; i++) {
+        float sL = residualLab3[i].L * residualScale3;
+        float sA = residualLab3[i].a * residualScale3;
+        float sB = residualLab3[i].b * residualScale3;
+        VoxelCoord coord = {
+            static_cast<int>(std::floor(sL / epsilonRes3)),
+            static_cast<int>(std::floor(sA / epsilonRes3)),
+            static_cast<int>(std::floor(sB / epsilonRes3))
+        };
+        residualIndexMatrix3[i] = residualResult3.voxelToClusterIdx[coord];
+    }
+
+    std::cout << "Residual 3 Clusters: " << residualPalette3.size() << std::endl;
+
+    GradientData residualGradients3 = encodeGradients(
+        residualIndexMatrix3, residualLab3, width, height,
+        GradientPrecision::BITS_2, 0.25f, 16
+    );
+
+    // ── Reconstruct residual 3 for visualization ──────────────────────────────
+    std::vector<LabF> reconstructedRes3Final(width * height);
+    for (int i = 0; i < width * height; i++) {
+        int cIdx = residualIndexMatrix3[i];
+        reconstructedRes3Final[i] = { residualPalette3[cIdx].L, residualPalette3[cIdx].a, residualPalette3[cIdx].b };
+    }
+    applyGradients(reconstructedRes3Final, residualIndexMatrix3, residualPalette3, residualGradients3, width, height);
+
+
+    /*
+    // ── Update fullRecon to include residual 3 ────────────────────────────────
+    for (int i = 0; i < width * height; i++) {
+        fullRecon[i] = {
+            reconstructed[i].L + reconstructedRes1[i].L + reconstructedRes2[i].L + reconstructedRes3Final[i].L,
+            reconstructed[i].a + reconstructedRes1[i].a + reconstructedRes2[i].a + reconstructedRes3Final[i].a,
+            reconstructed[i].b + reconstructedRes1[i].b + reconstructedRes2[i].b + reconstructedRes3Final[i].b
+        };
+    }
+    */
 
     // ══════════════════════════════════════════════════════════════════════════
     // VISUALIZATION
@@ -456,7 +572,8 @@ int main(int argc, char* argv[]) {
                width, height,
                palette, indexMatrix, gradients,
                residualPalette,  residualIndexMatrix,  residualGradients,
-               residualPalette2, residualIndexMatrix2, residualGradients2);
+               residualPalette2, residualIndexMatrix2, residualGradients2,
+               residualPalette3, residualIndexMatrix3, residualGradients3);
 
 
 

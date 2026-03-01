@@ -19,16 +19,24 @@
 // ── Full decoded SIF data ─────────────────────────────────────────────────────
 struct SIFData {
     int width = 0, height = 0;
+
     std::vector<PaletteEntry> palette;
     std::vector<int>          indexMatrix;
     GradientData              gradients;
+
     std::vector<PaletteEntry> residualPalette;
     std::vector<int>          residualIndexMatrix;
     GradientData              residualGradients;
+
     bool valid = false;
+
     std::vector<PaletteEntry> residualPalette2;
     std::vector<int>          residualIndexMatrix2;
     GradientData              residualGradients2;
+
+    std::vector<PaletteEntry> residualPalette3;
+    std::vector<int>          residualIndexMatrix3;
+    GradientData              residualGradients3;
 };
 
 
@@ -321,6 +329,24 @@ SIFData loadSIF(const std::string& path) {
             std::cout << "No residual 2 data in file.\n";
         }
     }
+
+    // ── 5. Residual 3 (magic 0xFC) ────────────────────────────────────────────
+    {
+        uint8_t magic3 = 0;
+        file.read((char*)&magic3, 1);
+        if (!file.fail() && magic3 == 0xFC) {
+            decodeSection(result.residualPalette3, result.residualIndexMatrix3, totalPixels);
+            std::cout << "Residual 3 palette: " << result.residualPalette3.size() << " colors, "
+                      << result.residualIndexMatrix3.size() << " pixels\n";
+
+            decodeGradientSection(result.residualGradients3);
+            std::cout << "Residual 3 gradients: " << result.residualGradients3.queue.size()
+                      << " descriptors, " << result.residualGradients3.changePoints.size() << " change points\n";
+        } else {
+            std::cout << "No residual 3 data in file.\n";
+        }
+    }
+
 
 done:
     if ((int)result.indexMatrix.size() == totalPixels)

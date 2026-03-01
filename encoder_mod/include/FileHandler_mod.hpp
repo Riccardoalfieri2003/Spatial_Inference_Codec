@@ -525,7 +525,10 @@ void saveSIF_v2(const std::string& path,
                 const GradientData& residualGradients,
                 const std::vector<PaletteEntry>& residualPalette2,
                 const std::vector<int>& residualIndexMatrix2,
-                const GradientData& residualGradients2)
+                const GradientData& residualGradients2,
+                const std::vector<PaletteEntry>& residualPalette3,
+                const std::vector<int>& residualIndexMatrix3,
+                const GradientData& residualGradients3)
 {
     std::ofstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -602,7 +605,6 @@ void saveSIF_v2(const std::string& path,
             file.write((char*)&code.first, 4);
         }
 
-        // ── Pre-compute bit count and write byte count before bitstream ───────
         uint32_t rleCount = (uint32_t)rleStream.size();
         file.write((char*)&rleCount, 4);
 
@@ -621,16 +623,14 @@ void saveSIF_v2(const std::string& path,
         bw.flush();
     };
 
-
     auto encodeGradientSection = [&](const GradientData& grad) {
         int precBits = (int)grad.precision;
-        uint16_t precByte = (uint16_t)grad.precision;
+        uint8_t precByte = (uint8_t)grad.precision;
         file.write((char*)&precByte, 1);
 
         uint32_t queueSize = (uint32_t)grad.queue.size();
         file.write((char*)&queueSize, 4);
 
-        // ── Pre-compute and write byte count before bitstream ─────────────────
         uint32_t gradByteCount = (uint32_t)(((uint64_t)queueSize * precBits + 7) / 8);
         file.write((char*)&gradByteCount, 4);
 
@@ -648,99 +648,97 @@ void saveSIF_v2(const std::string& path,
         }
     };
 
+    // ── Helper: encode a full residual layer ──────────────────────────────────
+    struct ResidualStats {
+        std::vector<RLESymbol> rle;
+        std::map<int, std::pair<uint32_t,int>> huff;
+        int maxRun = 1, bitsPerIndex = 1;
+    };
+
+    auto encodeResidualLayer = [&](
+        uint8_t magic,
+        const std::vector<PaletteEntry>& pal,
+        const std::vector<int>& idxMatrix,
+        const GradientData& grad,
+        ResidualStats& stats)
+    {
+        file.write((char*)&magic, 1);
+        encodeSection(pal, idxMatrix, stats.rle, stats.huff, stats.maxRun, stats.bitsPerIndex);
+        encodeGradientSection(grad);
+    };
+
     // ── 1. Header ─────────────────────────────────────────────────────────────
     uint32_t w = width, h = height;
     file.write((char*)&w, 4);
     file.write((char*)&h, 4);
 
-    // ── 2. Main palette + index matrix ────────────────────────────────────────
+    // ── 2. Main palette + index matrix + gradients ────────────────────────────
     std::vector<RLESymbol> mainRLE;
     std::map<int, std::pair<uint32_t,int>> mainHuff;
     int mainMaxRun = 1, mainBitsPerIndex = 1;
     encodeSection(palette, indexMatrix, mainRLE, mainHuff, mainMaxRun, mainBitsPerIndex);
-
-    // ── 3. Main gradients ─────────────────────────────────────────────────────
     encodeGradientSection(gradients);
 
-    // ── 4. Residual 1 ─────────────────────────────────────────────────────────
-    uint8_t magic1 = 0xFE;
-    file.write((char*)&magic1, 1);
-    std::vector<RLESymbol> resRLE;
-    std::map<int, std::pair<uint32_t,int>> resHuff;
-    int resMaxRun = 1, resBitsPerIndex = 1;
-    encodeSection(residualPalette, residualIndexMatrix, resRLE, resHuff, resMaxRun, resBitsPerIndex);
-    encodeGradientSection(residualGradients);
-
-    // ── 5. Residual 2 ─────────────────────────────────────────────────────────
-    uint8_t magic2 = 0xFD;
-    file.write((char*)&magic2, 1);
-    std::vector<RLESymbol> resRLE2;
-    std::map<int, std::pair<uint32_t,int>> resHuff2;
-    int resMaxRun2 = 1, resBitsPerIndex2 = 1;
-    encodeSection(residualPalette2, residualIndexMatrix2, resRLE2, resHuff2, resMaxRun2, resBitsPerIndex2);
-    encodeGradientSection(residualGradients2);
+    // ── 3. Residual layers ────────────────────────────────────────────────────
+    ResidualStats res1Stats, res2Stats, res3Stats;
+    encodeResidualLayer(0xFE, residualPalette,  residualIndexMatrix,  residualGradients,  res1Stats);
+    encodeResidualLayer(0xFD, residualPalette2, residualIndexMatrix2, residualGradients2, res2Stats);
+    encodeResidualLayer(0xFC, residualPalette3, residualIndexMatrix3, residualGradients3, res3Stats);
 
     file.close();
 
     // ── Statistics ────────────────────────────────────────────────────────────
-    size_t fileSize = std::filesystem::file_size(path);
-    int totalPixels = width * height;
+    size_t fileSize    = std::filesystem::file_size(path);
+    int    totalPixels = width * height;
 
-    auto gradSectionBytes = [&](const GradientData& grad) -> size_t {
+    auto gradBytes = [&](const GradientData& grad) -> size_t {
         int pb = (int)grad.precision;
-        return 1 + 4 + ((grad.queue.size() * pb + 7) / 8) +
-               4 + grad.changePoints.size() * (2+2+4);
+        return 1 + 4 + 4 + ((grad.queue.size() * pb + 7) / 8)
+                 + 4 + grad.changePoints.size() * (2+2+4);
     };
 
     auto pairKeyFn = [](int value, int run, int maxRun) {
         return value * (maxRun + 1) + (run - 1);
     };
 
-    size_t mainRleBits = 0;
-    for (auto& s : mainRLE)
-        mainRleBits += mainHuff.at(pairKeyFn(s.value, s.runLength, mainMaxRun)).second;
+    auto rleBits = [&](const std::vector<RLESymbol>& rle,
+                       const std::map<int,std::pair<uint32_t,int>>& huff,
+                       int maxRun) -> size_t {
+        size_t bits = 0;
+        for (auto& s : rle)
+            bits += huff.at(pairKeyFn(s.value, s.runLength, maxRun)).second;
+        return bits;
+    };
 
-    size_t resRleBits = 0;
-    for (auto& s : resRLE)
-        resRleBits += resHuff.at(pairKeyFn(s.value, s.runLength, resMaxRun)).second;
+    size_t mainBits = rleBits(mainRLE,      mainHuff,      mainMaxRun);
+    size_t r1Bits   = rleBits(res1Stats.rle, res1Stats.huff, res1Stats.maxRun);
+    size_t r2Bits   = rleBits(res2Stats.rle, res2Stats.huff, res2Stats.maxRun);
+    size_t r3Bits   = rleBits(res3Stats.rle, res3Stats.huff, res3Stats.maxRun);
 
-    size_t resRleBits2 = 0;
-    for (auto& s : resRLE2)
-        resRleBits2 += resHuff2.at(pairKeyFn(s.value, s.runLength, resMaxRun2)).second;
+    auto palBytes = [](const std::vector<PaletteEntry>& pal) -> size_t {
+        return 2 + pal.size() * 6;  // palSize(2) + 3×float16(2) per entry
+    };
 
-    size_t headerBytes       = 4 + 4;
-    size_t mainPalBytes      = 2 + palette.size() * 4;
-    size_t mainMetaBytes     = 1 + 4;
-    size_t mainHuffTblBytes  = 2 + mainHuff.size() * (4+1+4);
-    size_t mainRleBytes      = (mainRleBits + 7) / 8;
-    size_t mainGradBytes     = gradSectionBytes(gradients);
+    auto huffTblBytes = [](const std::map<int,std::pair<uint32_t,int>>& huff) -> size_t {
+        return 2 + huff.size() * (4+1+4);
+    };
 
-    size_t res1MagicBytes    = 1;
-    size_t res1PalBytes      = 2 + residualPalette.size() * 4;
-    size_t res1MetaBytes     = 1 + 4;
-    size_t res1HuffTblBytes  = 2 + resHuff.size() * (4+1+4);
-    size_t res1RleBytes      = (resRleBits + 7) / 8;
-    size_t res1GradBytes     = gradSectionBytes(residualGradients);
-    size_t res1TotalBytes    = res1MagicBytes + res1PalBytes + res1MetaBytes
-                             + res1HuffTblBytes + 4 + res1RleBytes + res1GradBytes;
-
-    size_t res2MagicBytes    = 1;
-    size_t res2PalBytes      = 2 + residualPalette2.size() * 4;
-    size_t res2MetaBytes     = 1 + 4;
-    size_t res2HuffTblBytes  = 2 + resHuff2.size() * (4+1+4);
-    size_t res2RleBytes      = (resRleBits2 + 7) / 8;
-    size_t res2GradBytes     = gradSectionBytes(residualGradients2);
-    size_t res2TotalBytes    = res2MagicBytes + res2PalBytes + res2MetaBytes
-                             + res2HuffTblBytes + 4 + res2RleBytes + res2GradBytes;
+    auto resLayerBytes = [&](const ResidualStats& s,
+                              const std::vector<PaletteEntry>& pal,
+                              const GradientData& grad) -> size_t {
+        return 1                          // magic
+             + palBytes(pal)              // palette
+             + 1 + 4                      // bitsPerIndex + maxRun
+             + huffTblBytes(s.huff)       // huffman table
+             + 4 + 4                      // rleCount + byteCount
+             + (rleBits(s.rle, s.huff, s.maxRun) + 7) / 8  // bitstream
+             + gradBytes(grad);           // gradients
+    };
 
     float bpp = (float)(fileSize * 8) / totalPixels;
 
-    auto pct = [&](size_t bytes) {
-        return (float)bytes * 100.0f / (float)fileSize;
-    };
-    auto bitsPerPx = [&](size_t bytes) {
-        return (float)(bytes * 8) / (float)totalPixels;
-    };
+    auto pct      = [&](size_t b) { return (float)b * 100.0f / (float)fileSize; };
+    auto bitsPerPx = [&](size_t b) { return (float)(b * 8) / (float)totalPixels; };
 
     auto row = [&](const std::string& name, size_t bytes) {
         std::cout << "| " << std::left  << std::setw(19) << name
@@ -751,46 +749,54 @@ void saveSIF_v2(const std::string& path,
                                         << pct(bytes) << "%  |\n";
     };
 
+    size_t mainSection = 4 + 4                           // header
+                       + palBytes(palette)               // main palette
+                       + 1 + 4                           // bitsPerIndex + maxRun
+                       + huffTblBytes(mainHuff)          // huffman table
+                       + 4 + 4                           // rleCount + byteCount
+                       + (mainBits + 7) / 8              // bitstream
+                       + gradBytes(gradients);           // gradients
+
+    size_t r1Total = resLayerBytes(res1Stats, residualPalette,  residualGradients);
+    size_t r2Total = resLayerBytes(res2Stats, residualPalette2, residualGradients2);
+    size_t r3Total = resLayerBytes(res3Stats, residualPalette3, residualGradients3);
+
     std::cout << "\n|------------------------------------------------------|\n";
     std::cout << "|              SIF File Breakdown                     |\n";
     std::cout << "|------------------------------------------------------|\n";
     std::cout << "| Section            | Bytes   |  bpp   |   % file  |\n";
     std::cout << "|------------------------------------------------------|\n";
-
-    row("Header",             headerBytes);
-    row("Main palette",       mainPalBytes);
-    row("Main Huff meta",     mainMetaBytes);
-    row("Main Huff table",    mainHuffTblBytes);
-    row("Main RLE stream",    mainRleBytes);
-    row("Main gradients",     mainGradBytes);
-    row("Residual 1",         res1TotalBytes);
-    row("  - palette",        res1PalBytes);
-    row("  - Huff meta",      res1MetaBytes);
-    row("  - Huff table",     res1HuffTblBytes);
-    row("  - RLE stream",     res1RleBytes);
-    row("  - gradients",      res1GradBytes);
-    row("Residual 2",         res2TotalBytes);
-    row("  - palette",        res2PalBytes);
-    row("  - Huff meta",      res2MetaBytes);
-    row("  - Huff table",     res2HuffTblBytes);
-    row("  - RLE stream",     res2RleBytes);
-    row("  - gradients",      res2GradBytes);
+    row("Main section",      mainSection);
+    row("  - palette",       palBytes(palette));
+    row("  - RLE stream",    (mainBits + 7) / 8);
+    row("  - gradients",     gradBytes(gradients));
+    row("Residual 1",        r1Total);
+    row("  - palette",       palBytes(residualPalette));
+    row("  - RLE stream",    (r1Bits + 7) / 8);
+    row("  - gradients",     gradBytes(residualGradients));
+    row("Residual 2",        r2Total);
+    row("  - palette",       palBytes(residualPalette2));
+    row("  - RLE stream",    (r2Bits + 7) / 8);
+    row("  - gradients",     gradBytes(residualGradients2));
+    row("Residual 3",        r3Total);
+    row("  - palette",       palBytes(residualPalette3));
+    row("  - RLE stream",    (r3Bits + 7) / 8);
+    row("  - gradients",     gradBytes(residualGradients3));
     std::cout << "|------------------------------------------------------|\n";
-    row("TOTAL",              fileSize);
+    row("TOTAL",             fileSize);
     std::cout << "|------------------------------------------------------|\n";
 
     int precBits = (int)gradients.precision;
     std::cout << "\n--- Per-element bit costs ---\n";
-    std::cout << "Palette entry:       " << 4*8       << " bits (L:8 a:8 b:8 e:8)\n";
+    std::cout << "Palette entry:       " << 3*16      << " bits (L:16 a:16 b:16 float16)\n";
     std::cout << "Huffman table entry: " << (4+1+4)*8 << " bits\n";
     std::cout << "Gradient descriptor: " << precBits  << " bits\n";
     std::cout << "Change point:        " << (2+2+4)*8 << " bits\n";
     std::cout << "Avg main RLE symbol: " << std::fixed << std::setprecision(2)
-              << (mainRleBits / (float)mainRLE.size()) << " bits\n";
-    std::cout << "Avg res1 RLE symbol: " << std::fixed << std::setprecision(2)
-              << (resRleBits  / (float)resRLE.size())  << " bits\n";
-    std::cout << "Avg res2 RLE symbol: " << std::fixed << std::setprecision(2)
-              << (resRleBits2 / (float)resRLE2.size()) << " bits\n";
+              << (mainBits / (float)mainRLE.size())        << " bits\n";
+    std::cout << "Avg res1 RLE symbol: " << (r1Bits / (float)res1Stats.rle.size()) << " bits\n";
+    std::cout << "Avg res2 RLE symbol: " << (r2Bits / (float)res2Stats.rle.size()) << " bits\n";
+    std::cout << "Avg res3 RLE symbol: " << (r3Bits / (float)res3Stats.rle.size()) << " bits\n";
 
     std::cout << "\n--- Summary ---\n";
     std::cout << "Image:           " << width << "x" << height

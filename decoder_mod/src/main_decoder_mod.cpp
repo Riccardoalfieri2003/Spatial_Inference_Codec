@@ -499,13 +499,24 @@ int main(int argc, char* argv[]) {
         applyGradients(residualImage2, data.residualIndexMatrix2, data.residualPalette2, data.residualGradients2, data.width, data.height);
     }
 
+    // ── Step 3: Residual 3 + gradients ────────────────────────────────────────
+    std::vector<LabF> residualImage3(totalPixels, {0.0f, 0.0f, 0.0f});
+    if (!data.residualPalette3.empty()) {
+        for (int i = 0; i < totalPixels; i++) {
+            const PaletteEntry& p = data.residualPalette3[data.residualIndexMatrix3[i]];
+            residualImage3[i] = {p.L, p.a, p.b};
+        }
+        applyGradients(residualImage3, data.residualIndexMatrix3, data.residualPalette3, data.residualGradients3, data.width, data.height);
+    }
+
+
     // ── Step 4: Full reconstruction ───────────────────────────────────────────
     std::vector<LabF> finalImage(totalPixels);
     for (int i = 0; i < totalPixels; i++) {
         finalImage[i] = {
-            labImage[i].L + residualImage[i].L + residualImage2[i].L,
-            labImage[i].a + residualImage[i].a + residualImage2[i].a,
-            labImage[i].b + residualImage[i].b + residualImage2[i].b
+            labImage[i].L + residualImage[i].L + residualImage2[i].L + residualImage3[i].L,
+            labImage[i].a + residualImage[i].a + residualImage2[i].a + residualImage3[i].L,
+            labImage[i].b + residualImage[i].b + residualImage2[i].b + residualImage3[i].L
         };
     }
 
