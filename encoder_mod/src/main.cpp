@@ -36,8 +36,8 @@ int main(int argc, char* argv[]) {
               << " and Max Steps: " << maxStepsFromRoot << std::endl;
 
     // ... your image loading code ...
-    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
-    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
+    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
     
 
     int width, height, channels;
@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
                 palette[indexMatrix[i]].L, palette[indexMatrix[i]].a, palette[indexMatrix[i]].b,
                 buf[i*3], buf[i*3+1], buf[i*3+2]);
         }
-        stbi_write_png("debug_raw_quantized_NO_GRAD_encoder.png", width, height, 3, buf.data(), width * 3);
+        //stbi_write_png("debug_raw_quantized_NO_GRAD_encoder.png", width, height, 3, buf.data(), width * 3);
     }
 
     
@@ -408,7 +408,7 @@ int main(int argc, char* argv[]) {
                 img[i].L + shiftL, img[i].a, img[i].b,
                 buf[i*3], buf[i*3+1], buf[i*3+2]);
         }
-        stbi_write_png(filename.c_str(), width, height, 3, buf.data(), width * 3);
+        //stbi_write_png(filename.c_str(), width, height, 3, buf.data(), width * 3);
         std::cout << "Saved: " << filename << "\n";
     };
 
@@ -423,7 +423,7 @@ int main(int argc, char* argv[]) {
                 img[i].L + shiftL, img[i].a, img[i].b,
                 buf[i*3], buf[i*3+1], buf[i*3+2]);
         }
-        stbi_write_png(filename.c_str(), width, height, 3, buf.data(), width * 3);
+        //stbi_write_png(filename.c_str(), width, height, 3, buf.data(), width * 3);
         std::cout << "Saved: " << filename << "\n";
     };
 

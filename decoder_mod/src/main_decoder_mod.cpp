@@ -443,7 +443,7 @@ int main(int argc, char* argv[]) {
                 labImage[i].L, labImage[i].a, labImage[i].b,
                 buf[i*3], buf[i*3+1], buf[i*3+2]);
         }
-        stbi_write_png("debug_raw_quantized_NO_GRAD_decoder.png", data.width, data.height, 3, buf.data(), data.width * 3);
+        //stbi_write_png("debug_raw_quantized_NO_GRAD_decoder.png", data.width, data.height, 3, buf.data(), data.width * 3);
     }
 
     std::cout << "labImage[0] before grad: L=" << labImage[0].L 
@@ -486,7 +486,7 @@ int main(int argc, char* argv[]) {
             const PaletteEntry& p = data.residualPalette[data.residualIndexMatrix[i]];
             residualImage[i] = {p.L, p.a, p.b};
         }
-        //applyGradients(residualImage, data.residualIndexMatrix, data.residualPalette, data.residualGradients, data.width, data.height);
+        applyGradients(residualImage, data.residualIndexMatrix, data.residualPalette, data.residualGradients, data.width, data.height);
     }
 
     // ── Step 3: Residual 2 + gradients ────────────────────────────────────────
@@ -496,7 +496,7 @@ int main(int argc, char* argv[]) {
             const PaletteEntry& p = data.residualPalette2[data.residualIndexMatrix2[i]];
             residualImage2[i] = {p.L, p.a, p.b};
         }
-        //applyGradients(residualImage2, data.residualIndexMatrix2, data.residualPalette2, data.residualGradients2, data.width, data.height);
+        applyGradients(residualImage2, data.residualIndexMatrix2, data.residualPalette2, data.residualGradients2, data.width, data.height);
     }
 
     // ── Step 4: Full reconstruction ───────────────────────────────────────────
@@ -517,14 +517,14 @@ int main(int argc, char* argv[]) {
                 img[i].L + shiftL, img[i].a, img[i].b,
                 buf[i*3], buf[i*3+1], buf[i*3+2]);
         }
-        stbi_write_png(name.c_str(), data.width, data.height, 3, buf.data(), data.width * 3);
+        //stbi_write_png(name.c_str(), data.width, data.height, 3, buf.data(), data.width * 3);
         //system(("start " + name).c_str());
     };
 
-    saveAndOpen(labImage,       "debug_quantized_grad.png");
-    saveAndOpen(residualImage,  "debug_residual1_grad.png", 50.0f);
-    saveAndOpen(residualImage2, "debug_residual2_grad.png", 50.0f);
-    saveAndOpen(finalImage,     "debug_full_reconstruction.png");
+    //saveAndOpen(labImage,       "debug_quantized_grad.png");
+    //saveAndOpen(residualImage,  "debug_residual1_grad.png", 50.0f);
+    //saveAndOpen(residualImage2, "debug_residual2_grad.png", 50.0f);
+    //saveAndOpen(finalImage,     "debug_full_reconstruction.png");
 
     /*
     // ── Step 6: Sphere-constrained reconstruction ─────────────────────────────
@@ -668,6 +668,119 @@ int main(int argc, char* argv[]) {
             finalImage[i].L, finalImage[i].a, finalImage[i].b,
             pixels[i*3], pixels[i*3+1], pixels[i*3+2]);
     }
+
+    // ── Step 8: Post-processing filter ───────────────────────────────────────
+    // Choose one filter by setting the enum value
+    enum class FilterMode { NONE, GAUSSIAN, BILATERAL, MEDIAN };
+    FilterMode filterMode = FilterMode::BILATERAL;  // ← change this to try different filters
+
+    if (filterMode != FilterMode::NONE) {
+        std::vector<unsigned char> filtered(totalPixels * 3);
+
+        // ── Gaussian blur (fast, uniform smoothing) ───────────────────────────
+        if (filterMode == FilterMode::GAUSSIAN) {
+            const int radius = 1;
+            const float kernel[3][3] = {
+                {1/16.f, 2/16.f, 1/16.f},
+                {2/16.f, 4/16.f, 2/16.f},
+                {1/16.f, 2/16.f, 1/16.f}
+            };
+            for (int y = 0; y < data.height; y++) {
+                for (int x = 0; x < data.width; x++) {
+                    float r = 0, g = 0, b = 0;
+                    for (int dy = -radius; dy <= radius; dy++) {
+                        for (int dx = -radius; dx <= radius; dx++) {
+                            int nx = std::clamp(x + dx, 0, data.width  - 1);
+                            int ny = std::clamp(y + dy, 0, data.height - 1);
+                            float w = kernel[dy + radius][dx + radius];
+                            int idx = (ny * data.width + nx) * 3;
+                            r += pixels[idx]   * w;
+                            g += pixels[idx+1] * w;
+                            b += pixels[idx+2] * w;
+                        }
+                    }
+                    int out = (y * data.width + x) * 3;
+                    filtered[out]   = (unsigned char)std::clamp(r, 0.f, 255.f);
+                    filtered[out+1] = (unsigned char)std::clamp(g, 0.f, 255.f);
+                    filtered[out+2] = (unsigned char)std::clamp(b, 0.f, 255.f);
+                }
+            }
+        }
+
+        // ── Bilateral filter (edge-preserving noise reduction) ────────────────
+        // Best for reducing quantization noise while keeping sharp edges
+        else if (filterMode == FilterMode::BILATERAL) {
+            const int   radius    = 2;
+            const float sigmaS    = 5.0f;   // spatial sigma — larger = wider blur
+            const float sigmaR    = 5.0f;  // range sigma  — larger = less edge preservation
+            for (int y = 0; y < data.height; y++) {
+                for (int x = 0; x < data.width; x++) {
+                    int ci = (y * data.width + x) * 3;
+                    float cr = pixels[ci], cg = pixels[ci+1], cb = pixels[ci+2];
+                    float sumR = 0, sumG = 0, sumB = 0, sumW = 0;
+                    for (int dy = -radius; dy <= radius; dy++) {
+                        for (int dx = -radius; dx <= radius; dx++) {
+                            int nx = std::clamp(x + dx, 0, data.width  - 1);
+                            int ny = std::clamp(y + dy, 0, data.height - 1);
+                            int ni = (ny * data.width + nx) * 3;
+                            float nr = pixels[ni], ng = pixels[ni+1], nb2 = pixels[ni+2];
+
+                            // Spatial weight
+                            float spatialDist = dx*dx + dy*dy;
+                            float ws = std::exp(-spatialDist / (2.f * sigmaS * sigmaS));
+
+                            // Range weight (color similarity)
+                            float colorDist = (cr-nr)*(cr-nr) + (cg-ng)*(cg-ng) + (cb-nb2)*(cb-nb2);
+                            float wr = std::exp(-colorDist / (2.f * sigmaR * sigmaR));
+
+                            float w = ws * wr;
+                            sumR += nr * w;
+                            sumG += ng * w;
+                            sumB += nb2 * w;
+                            sumW += w;
+                        }
+                    }
+                    int out = (y * data.width + x) * 3;
+                    filtered[out]   = (unsigned char)std::clamp(sumR / sumW, 0.f, 255.f);
+                    filtered[out+1] = (unsigned char)std::clamp(sumG / sumW, 0.f, 255.f);
+                    filtered[out+2] = (unsigned char)std::clamp(sumB / sumW, 0.f, 255.f);
+                }
+            }
+        }
+
+        // ── Median filter (removes salt-and-pepper noise, preserves edges) ────
+        else if (filterMode == FilterMode::MEDIAN) {
+            const int radius = 1;  // 3x3 window
+            for (int y = 0; y < data.height; y++) {
+                for (int x = 0; x < data.width; x++) {
+                    std::vector<unsigned char> rVals, gVals, bVals;
+                    for (int dy = -radius; dy <= radius; dy++) {
+                        for (int dx = -radius; dx <= radius; dx++) {
+                            int nx = std::clamp(x + dx, 0, data.width  - 1);
+                            int ny = std::clamp(y + dy, 0, data.height - 1);
+                            int ni = (ny * data.width + nx) * 3;
+                            rVals.push_back(pixels[ni]);
+                            gVals.push_back(pixels[ni+1]);
+                            bVals.push_back(pixels[ni+2]);
+                        }
+                    }
+                    std::sort(rVals.begin(), rVals.end());
+                    std::sort(gVals.begin(), gVals.end());
+                    std::sort(bVals.begin(), bVals.end());
+                    int mid = rVals.size() / 2;
+                    int out = (y * data.width + x) * 3;
+                    filtered[out]   = rVals[mid];
+                    filtered[out+1] = gVals[mid];
+                    filtered[out+2] = bVals[mid];
+                }
+            }
+        }
+
+        pixels = filtered;
+        std::cout << "Filter applied: " << (int)filterMode << "\n";
+    }
+
+
 
 
 
