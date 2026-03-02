@@ -44,3 +44,17 @@ target_include_directories(channel_encoder PRIVATE
     encoder_mod/lib 
     util
 )
+
+
+add_executable(channel_decoder
+    channel_decoder/src/main.cpp
+    encoder_mod/src/ImageConverter_mod.cpp
+    encoder_mod/include/GradientReconstruction_mod.hpp
+)
+
+target_include_directories(channel_decoder PRIVATE 
+    decoder_mod/include 
+    decoder_mod/lib 
+    encoder_mod/include
+    util
+)
