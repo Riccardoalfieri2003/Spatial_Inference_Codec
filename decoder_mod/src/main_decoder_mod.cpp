@@ -72,6 +72,7 @@ static float applyShape(float t, uint8_t shape) {
 
 // Width in pixels for each width code
 static int widthPixels(uint8_t w) {
+    return 0;
     switch (w) {
         case 0: return 1;
         case 1: return 3;
@@ -551,7 +552,7 @@ int main(int argc, char* argv[]) {
     // ── Step 8: Post-processing filter ───────────────────────────────────────
     // Choose one filter by setting the enum value
     enum class FilterMode { NONE, GAUSSIAN, BILATERAL, MEDIAN };
-    FilterMode filterMode = FilterMode::NONE;  // ← change this to try different filters
+    FilterMode filterMode = FilterMode::BILATERAL;  // ← change this to try different filters
 
     if (filterMode != FilterMode::NONE) {
         std::vector<unsigned char> filtered(totalPixels * 3);

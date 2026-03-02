@@ -21,6 +21,7 @@ target_include_directories(encoder_mod PRIVATE
     util
 )
 
+
 add_executable(decoder_mod
     decoder_mod/src/main_decoder_mod.cpp
     encoder_mod/src/ImageConverter_mod.cpp
@@ -29,5 +30,17 @@ add_executable(decoder_mod
 target_include_directories(decoder_mod PRIVATE 
     decoder_mod/include 
     decoder_mod/lib 
+    util
+)
+
+
+add_executable(channel_encoder
+    channel_encoder/src/main.cpp
+    encoder_mod/src/ImageConverter_mod.cpp
+)
+
+target_include_directories(channel_encoder PRIVATE 
+    encoder_mod/include 
+    encoder_mod/lib 
     util
 )

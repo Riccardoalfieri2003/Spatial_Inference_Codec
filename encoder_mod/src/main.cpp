@@ -20,11 +20,13 @@
 
 // ── Simulate float16 palette quantization (mirrors decoder precision) ─────
 auto quantizePalette = [](std::vector<PaletteEntry>& pal) {
+    
     for (auto& p : pal) {
         p.L = halfToFloat(floatToHalf(p.L));
         p.a = halfToFloat(floatToHalf(p.a));
         p.b = halfToFloat(floatToHalf(p.b));
     }
+        
 };
 
 
@@ -323,10 +325,6 @@ int main(int argc, char* argv[]) {
     // After main palette is built:
     quantizePalette(residualPalette);
 
-    // Encoder — after quantizePalette(residualPalette):
-    for (int i = 0; i < 5; i++)
-        std::cout << "ENC resPalette[" << i << "] L=" << residualPalette[i].L 
-                << " a=" << residualPalette[i].a << " b=" << residualPalette[i].b << "\n";
 
     // ── Build index matrix using scaled coords ────────────────────────────────
     std::vector<int> residualIndexMatrix(width * height);
@@ -432,10 +430,6 @@ int main(int argc, char* argv[]) {
     // After main palette is built:
     quantizePalette(residualPalette2);
 
-    // Encoder — after quantizePalette(residualPalette):
-for (int i = 0; i < 5; i++)
-    std::cout << "ENC resPalette2[" << i << "] L=" << residualPalette2[i].L 
-              << " a=" << residualPalette2[i].a << " b=" << residualPalette2[i].b << "\n";
 
     std::cout << "Residual 2 Clusters: " << residualPalette2.size() << std::endl;
 
@@ -535,10 +529,6 @@ for (int i = 0; i < 5; i++)
     // After main palette is built:
     quantizePalette(residualPalette3);
 
-    // Encoder — after quantizePalette(residualPalette):
-for (int i = 0; i < 5; i++)
-    std::cout << "ENC resPalette3[" << i << "] L=" << residualPalette3[i].L 
-              << " a=" << residualPalette3[i].a << " b=" << residualPalette3[i].b << "\n";
 
     std::cout << "Residual 3 Clusters: " << residualPalette3.size() << std::endl;
 
@@ -570,14 +560,6 @@ for (int i = 0; i < 5; i++)
     }
     */
 
-    std::cout << "\n--- ENCODER FINAL STATE ---\n";
-    for (int i = 0; i < 5; i++)
-        std::cout << "ENC final palette[" << i << "] L=" << palette[i].L 
-                << " a=" << palette[i].a << " b=" << palette[i].b << "\n";
-    std::cout << "ENC gradients queue[0]: shape=" << (int)gradients.queue[0].shape
-            << " width=" << (int)gradients.queue[0].width << "\n";
-    std::cout << "ENC reconstructed[0]: L=" << reconstructed[0].L
-            << " a=" << reconstructed[0].a << " b=" << reconstructed[0].b << "\n";
 
     // ══════════════════════════════════════════════════════════════════════════
     // VISUALIZATION
