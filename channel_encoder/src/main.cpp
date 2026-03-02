@@ -19,6 +19,26 @@
 #include "PaletteEntry.hpp"
 
 
+
+// ── Subsample: keep only even-indexed rows and columns ────────────────────
+// Output dimensions: subW = width/2, subH = height/2
+std::vector<int> subsampleChannelMatrix(
+    const std::vector<int>& indexMatrix,
+    int width, int height,
+    int& subW, int& subH)
+{
+    subW = width  / 2;
+    subH = height / 2;
+
+    std::vector<int> sub(subW * subH);
+    for (int y = 0; y < subH; y++)
+        for (int x = 0; x < subW; x++)
+            sub[y * subW + x] = indexMatrix[(y * 2) * width + (x * 2)];
+
+    return sub;
+}
+
+
 void saveSIF_perChannel(const std::string& path,
                         int width, int height,
                         const std::vector<PaletteEntry>& paletteL,
@@ -29,12 +49,30 @@ void saveSIF_perChannel(const std::string& path,
                         const GradientData& gradientsA,
                         const std::vector<PaletteEntry>& paletteB,
                         const std::vector<int>& indexMatrixB,
-                        const GradientData& gradientsB)
+                        const GradientData& gradientsB,
+                    
+                        bool subsample)
 {
     std::ofstream file(path, std::ios::binary);
     if (!file.is_open()) {
         std::cerr << "Error: Could not open file: " << path << "\n";
         return;
+    }
+
+    // ── Optionally subsample all three channel matrices ────────────────────
+    int subW = width, subH = height;
+    std::vector<int> idxL, idxA, idxB;
+
+    if (subsample) {
+        idxL = subsampleChannelMatrix(indexMatrixL, width, height, subW, subH);
+        idxA = subsampleChannelMatrix(indexMatrixA, width, height, subW, subH);
+        idxB = subsampleChannelMatrix(indexMatrixB, width, height, subW, subH);
+        std::cout << "Subsampled: " << width << "x" << height 
+                  << " -> " << subW << "x" << subH << "\n";
+    } else {
+        idxL = indexMatrixL;
+        idxA = indexMatrixA;
+        idxB = indexMatrixB;
     }
 
     struct RLESymbol { int value; int runLength; };
@@ -47,23 +85,37 @@ void saveSIF_perChannel(const std::string& path,
         std::map<int, std::pair<uint32_t,int>>& huffTable,
         int& maxRun, int& bitsPerIndex)
     {
-        // Only store the L value (first field) since each palette
-        // is 1D — a=0 and b=0 are implicit
         uint16_t palSize = (uint16_t)pal.size();
         file.write((char*)&palSize, 2);
         for (const auto& p : pal) {
             uint16_t val = floatToHalf(p.L);
-            file.write((char*)&val, 2);  // 2 bytes per entry instead of 6
+            file.write((char*)&val, 2);
         }
 
         bitsPerIndex = 1;
         while ((1 << bitsPerIndex) < palSize) bitsPerIndex++;
 
-        if (!idxMatrix.empty()) {
-            int cur = idxMatrix[0], run = 1;
-            for (size_t i = 1; i < idxMatrix.size(); i++) {
-                if (idxMatrix[i] == cur) { run++; }
-                else { rleStream.push_back({cur, run}); cur = idxMatrix[i]; run = 1; }
+        // ── Delta prediction before RLE ───────────────────────────────────────
+        // Instead of encoding raw indices, encode the difference between
+        // each index and the previous one. This creates longer runs of 0s
+        // in smooth regions, improving RLE compression significantly.
+        // We use palette value differences to find the nearest palette entry
+        // for each delta — but for simplicity, just use index deltas directly.
+        // The delta is stored as: delta + palSize (to make it positive)
+        // so range is [0, 2*palSize-1]
+        std::vector<int> deltaMatrix(idxMatrix.size());
+        deltaMatrix[0] = idxMatrix[0];  // first value stored as-is
+        for (size_t i = 1; i < idxMatrix.size(); i++) {
+            deltaMatrix[i] = idxMatrix[i] - idxMatrix[i-1] + (int)palSize;
+        }
+        int deltaRange = 2 * (int)palSize;  // range of delta values
+
+        // ── RLE on delta stream ───────────────────────────────────────────────
+        if (!deltaMatrix.empty()) {
+            int cur = deltaMatrix[0], run = 1;
+            for (size_t i = 1; i < deltaMatrix.size(); i++) {
+                if (deltaMatrix[i] == cur) { run++; }
+                else { rleStream.push_back({cur, run}); cur = deltaMatrix[i]; run = 1; }
             }
             rleStream.push_back({cur, run});
         }
@@ -75,6 +127,7 @@ void saveSIF_perChannel(const std::string& path,
             return value * (maxRun + 1) + (run - 1);
         };
 
+        // ── Huffman entropy coding ────────────────────────────────────────────
         std::map<int,int> freq;
         for (auto& s : rleStream) freq[pairKey(s.value, s.runLength)]++;
 
@@ -92,6 +145,10 @@ void saveSIF_perChannel(const std::string& path,
             }
             buildCodes(pq.top(), "", huffTable);
         }
+
+        // Write delta range so decoder can reconstruct
+        uint16_t deltaRangeU = (uint16_t)deltaRange;
+        file.write((char*)&deltaRangeU, 2);
 
         file.write((char*)&bitsPerIndex, 1);
         file.write((char*)&maxRun,       4);
@@ -168,15 +225,33 @@ void saveSIF_perChannel(const std::string& path,
 
     // ── 1. Header ─────────────────────────────────────────────────────────────
     uint32_t w = width, h = height;
-    file.write((char*)&w, 4);
-    file.write((char*)&h, 4);
+    if (subsample){
+        uint32_t w = width, h = height;
+        uint32_t sw = subW, sh = subH;
+        file.write((char*)&w,  4);
+        file.write((char*)&h,  4);
+        file.write((char*)&sw, 4);  // ← store subsampled dims so decoder knows
+        file.write((char*)&sh, 4);
+        uint8_t subsampleFlag = subsample ? 1 : 0;
+        file.write((char*)&subsampleFlag, 1);
+    }else{
+        file.write((char*)&w, 4);
+        file.write((char*)&h, 4);
+    }
+    
 
     // ── 2. Three channel layers ───────────────────────────────────────────────
     // Magic bytes: 0xC1=L channel, 0xC2=A channel, 0xC3=B channel
     ChannelStats statsL, statsA, statsB;
-    encodeChannelLayer(0xC1, paletteL, indexMatrixL, gradientsL, statsL);
-    encodeChannelLayer(0xC2, paletteA, indexMatrixA, gradientsA, statsA);
-    encodeChannelLayer(0xC3, paletteB, indexMatrixB, gradientsB, statsB);
+    if(subsample){
+        encodeChannelLayer(0xC1, paletteL, idxL, gradientsL, statsL);
+        encodeChannelLayer(0xC2, paletteA, idxA, gradientsA, statsA);
+        encodeChannelLayer(0xC3, paletteB, idxB, gradientsB, statsB);
+    }else{
+        encodeChannelLayer(0xC1, paletteL, indexMatrixL, gradientsL, statsL);
+        encodeChannelLayer(0xC2, paletteA, indexMatrixA, gradientsA, statsA);
+        encodeChannelLayer(0xC3, paletteB, indexMatrixB, gradientsB, statsB);
+    }
 
     file.close();
 
@@ -309,7 +384,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Per-channel Encoder: epsilonL=" << epsilonL
               << " epsilonA=" << epsilonA << " epsilonB=" << epsilonB << "\n";
 
-    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
 
     int width, height, channels;
     unsigned char* imgData = stbi_load(filename, &width, &height, &channels, 0);
@@ -471,7 +547,8 @@ int main(int argc, char* argv[]) {
                    width, height,
                    palEntL, indexMatrixL, gradientsL,
                    palEntA, indexMatrixA, gradientsA,
-                   palEntB, indexMatrixB, gradientsB);
+                   palEntB, indexMatrixB, gradientsB,
+                   true);
 
 
 
