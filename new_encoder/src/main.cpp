@@ -276,6 +276,348 @@ void reconstructFinalImage_noResiduals(
 
 
 
+
+
+
+
+
+
+
+
+std::vector<int> applyMED_encode(
+    const std::vector<int>& indexMatrix,
+    int width, int height,
+    int paletteSize)
+{
+    std::vector<int> residuals(width * height);
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int idx = y * width + x;
+            int val = indexMatrix[idx];
+            int prediction;
+            if (x == 0 && y == 0) {
+                prediction = 0;
+            } else if (y == 0) {
+                prediction = indexMatrix[idx - 1];
+            } else if (x == 0) {
+                prediction = indexMatrix[(y-1) * width];
+            } else {
+                int W  = indexMatrix[idx - 1];
+                int N  = indexMatrix[(y-1) * width + x];
+                int NW = indexMatrix[(y-1) * width + (x-1)];
+                if      (NW >= std::max(W, N)) prediction = std::min(W, N);
+                else if (NW <= std::min(W, N)) prediction = std::max(W, N);
+                else                           prediction = W + N - NW;
+            }
+            residuals[idx] = val - prediction + paletteSize;
+        }
+    }
+    return residuals;
+}
+
+
+void saveSIF_perChannel(const std::string& path,
+                        int width, int height,
+                        // Base channels
+                        const ChannelQuantization& baseL, const GradientData& gradsL,
+                        const ChannelQuantization& baseA, const GradientData& gradsA,
+                        const ChannelQuantization& baseB, const GradientData& gradsB,
+                        // Residual channels
+                        const ChannelResult& resL,
+                        const ChannelResult& resA,
+                        const ChannelResult& resB)
+{
+    std::ofstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file: " << path << "\n";
+        return;
+    }
+
+    struct RLESymbol { int value; int runLength; };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // encodeSection: palette + MED + RLE + Huffman
+    // ─────────────────────────────────────────────────────────────────────────
+    auto encodeSection = [&](
+        const std::vector<float>& pal,
+        const std::vector<int>& idxMatrix,
+        std::vector<RLESymbol>& rleStream,
+        std::map<int, std::pair<uint32_t,int>>& huffTable,
+        int& maxRun, int& bitsPerIndex)
+    {
+        // Palette
+        uint16_t palSize = (uint16_t)pal.size();
+        file.write((char*)&palSize, 2);
+        for (float p : pal) {
+            uint16_t val = floatToHalf(p);
+            file.write((char*)&val, 2);
+        }
+
+        bitsPerIndex = 1;
+        while ((1 << bitsPerIndex) < (int)palSize) bitsPerIndex++;
+
+        // MED prediction
+        std::vector<int> encoded = applyMED_encode(idxMatrix, width, height, (int)palSize);
+        int medRange = 2 * (int)palSize;
+
+        // RLE
+        if (!encoded.empty()) {
+            int cur = encoded[0], run = 1;
+            for (size_t i = 1; i < encoded.size(); i++) {
+                if (encoded[i] == cur) { run++; }
+                else { rleStream.push_back({cur, run}); cur = encoded[i]; run = 1; }
+            }
+            rleStream.push_back({cur, run});
+        }
+
+        maxRun = 1;
+        for (auto& s : rleStream) maxRun = std::max(maxRun, s.runLength);
+
+        auto pairKey = [&](int value, int run) {
+            return value * (maxRun + 1) + (run - 1);
+        };
+
+        // Huffman
+        std::map<int,int> freq;
+        for (auto& s : rleStream) freq[pairKey(s.value, s.runLength)]++;
+
+        if (freq.size() == 1) {
+            huffTable[freq.begin()->first] = {0, 1};
+        } else {
+            std::priority_queue<Node*, std::vector<Node*>, Compare> pq;
+            for (auto const& [id, f] : freq) pq.push(new Node(id, f));
+            while (pq.size() > 1) {
+                Node* left  = pq.top(); pq.pop();
+                Node* right = pq.top(); pq.pop();
+                Node* top   = new Node(-1, left->freq + right->freq);
+                top->left = left; top->right = right;
+                pq.push(top);
+            }
+            buildCodes(pq.top(), "", huffTable);
+        }
+
+        // Write metadata + bitstream
+        uint16_t medRangeU = (uint16_t)medRange;
+        file.write((char*)&medRangeU, 2);
+        file.write((char*)&bitsPerIndex, 1);
+        file.write((char*)&maxRun, 4);
+
+        uint16_t tableEntries = (uint16_t)huffTable.size();
+        file.write((char*)&tableEntries, 2);
+        for (auto const& [key, code] : huffTable) {
+            uint8_t len = (uint8_t)code.second;
+            file.write((char*)&key,        4);
+            file.write((char*)&len,        1);
+            file.write((char*)&code.first, 4);
+        }
+
+        uint32_t rleCount = (uint32_t)rleStream.size();
+        file.write((char*)&rleCount, 4);
+
+        size_t totalBits = 0;
+        for (auto& s : rleStream)
+            totalBits += huffTable.at(pairKey(s.value, s.runLength)).second;
+        uint32_t byteCount = (uint32_t)((totalBits + 7) / 8);
+        file.write((char*)&byteCount, 4);
+
+        BitWriter bw(file);
+        for (auto& s : rleStream) {
+            auto& [code, len] = huffTable[pairKey(s.value, s.runLength)];
+            bw.write(code, len);
+        }
+        bw.flush();
+    };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // encodeGradientSection: unchanged
+    // ─────────────────────────────────────────────────────────────────────────
+    auto encodeGradientSection = [&](const GradientData& grad) {
+        int     precBits = (int)grad.precision;
+        uint8_t precByte = (uint8_t)grad.precision;
+        file.write((char*)&precByte, 1);
+
+        uint32_t queueSize = (uint32_t)grad.queue.size();
+        file.write((char*)&queueSize, 4);
+
+        uint32_t gradByteCount = (uint32_t)(((uint64_t)queueSize * precBits + 7) / 8);
+        file.write((char*)&gradByteCount, 4);
+
+        BitWriter bwGrad(file);
+        for (const auto& desc : grad.queue)
+            bwGrad.write(desc.pack(grad.precision), precBits);
+        bwGrad.flush();
+
+        uint32_t cpCount = (uint32_t)grad.changePoints.size();
+        file.write((char*)&cpCount, 4);
+        for (const auto& cp : grad.changePoints) {
+            file.write((char*)&cp.x,        2);
+            file.write((char*)&cp.y,        2);
+            file.write((char*)&cp.queueIdx, 4);
+        }
+    };
+
+    struct ChannelStats {
+        std::vector<RLESymbol> rle;
+        std::map<int, std::pair<uint32_t,int>> huff;
+        int maxRun = 1, bitsPerIndex = 1;
+    };
+
+    // Single helper: encodes palette+indices+gradients for any layer
+    auto encodeLayer = [&](
+        uint8_t magic,
+        const std::vector<float>& pal,
+        const std::vector<int>& idx,
+        const GradientData& grad,
+        ChannelStats& stats)
+    {
+        file.write((char*)&magic, 1);
+        encodeSection(pal, idx, stats.rle, stats.huff, stats.maxRun, stats.bitsPerIndex);
+        encodeGradientSection(grad);
+    };
+
+    // ── Header ────────────────────────────────────────────────────────────────
+    uint32_t w = (uint32_t)width;
+    uint32_t h = (uint32_t)height;
+    file.write((char*)&w, 4);
+    file.write((char*)&h, 4);
+
+    // ── Base layers (0xC1 / 0xC2 / 0xC3) ─────────────────────────────────────
+    ChannelStats statsL, statsA, statsB;
+    encodeLayer(0xC1, baseL.palette, baseL.indexMatrix, gradsL, statsL);
+    encodeLayer(0xC2, baseA.palette, baseA.indexMatrix, gradsA, statsA);
+    encodeLayer(0xC3, baseB.palette, baseB.indexMatrix, gradsB, statsB);
+
+    // ── Residual layers (0xD1 / 0xD2 / 0xD3) ─────────────────────────────────
+    ChannelStats resStatsL, resStatsA, resStatsB;
+    encodeLayer(0xD1, resL.palette, resL.indexMatrix, resL.gradients, resStatsL);
+    encodeLayer(0xD2, resA.palette, resA.indexMatrix, resA.gradients, resStatsA);
+    encodeLayer(0xD3, resB.palette, resB.indexMatrix, resB.gradients, resStatsB);
+
+    file.close();
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Statistics
+    // ─────────────────────────────────────────────────────────────────────────
+    size_t fileSize    = std::filesystem::file_size(path);
+    int    totalPixels = width * height;
+
+    auto gradBytes = [&](const GradientData& grad) -> size_t {
+        int pb = (int)grad.precision;
+        return 1 + 4 + 4
+               + ((grad.queue.size() * pb + 7) / 8)
+               + 4 + grad.changePoints.size() * (2 + 2 + 4);
+    };
+    auto pairKeyFn = [](int value, int run, int maxRun) {
+        return value * (maxRun + 1) + (run - 1);
+    };
+    auto rleBits = [&](const std::vector<RLESymbol>& rle,
+                       const std::map<int,std::pair<uint32_t,int>>& huff,
+                       int mRun) -> size_t {
+        size_t bits = 0;
+        for (auto& s : rle)
+            bits += huff.at(pairKeyFn(s.value, s.runLength, mRun)).second;
+        return bits;
+    };
+    auto palBytes1D = [](const std::vector<float>& pal) -> size_t {
+        return 2 + pal.size() * 2;
+    };
+
+    size_t lBits    = rleBits(statsL.rle,    statsL.huff,    statsL.maxRun);
+    size_t aBits    = rleBits(statsA.rle,    statsA.huff,    statsA.maxRun);
+    size_t bBits    = rleBits(statsB.rle,    statsB.huff,    statsB.maxRun);
+    size_t resLBits = rleBits(resStatsL.rle, resStatsL.huff, resStatsL.maxRun);
+    size_t resABits = rleBits(resStatsA.rle, resStatsA.huff, resStatsA.maxRun);
+    size_t resBBits = rleBits(resStatsB.rle, resStatsB.huff, resStatsB.maxRun);
+
+    float bpp = (float)(fileSize * 8) / (float)totalPixels;
+
+    auto pct       = [&](size_t bytes) { return (float)(bytes * 8) * 100.0f / (float)(fileSize * 8); };
+    auto bitsPerPx = [&](size_t bytes) { return (float)(bytes * 8) / (float)totalPixels; };
+    auto row = [&](const std::string& name, size_t bytes) {
+        std::cout << "| " << std::left  << std::setw(22) << name
+                  << "| " << std::right << std::setw(7)  << bytes
+                  << " | "              << std::setw(5)  << std::fixed
+                                        << std::setprecision(3) << bitsPerPx(bytes)
+                  << "  | "             << std::setw(6)  << std::setprecision(2)
+                                        << pct(bytes) << "%  |\n";
+    };
+
+    size_t lBytes    = 1 + palBytes1D(baseL.palette) + (lBits+7)/8    + gradBytes(gradsL);
+    size_t aBytes    = 1 + palBytes1D(baseA.palette) + (aBits+7)/8    + gradBytes(gradsA);
+    size_t bBytes    = 1 + palBytes1D(baseB.palette) + (bBits+7)/8    + gradBytes(gradsB);
+    size_t resLBytes = 1 + palBytes1D(resL.palette)  + (resLBits+7)/8 + gradBytes(resL.gradients);
+    size_t resABytes = 1 + palBytes1D(resA.palette)  + (resABits+7)/8 + gradBytes(resA.gradients);
+    size_t resBBytes = 1 + palBytes1D(resB.palette)  + (resBBits+7)/8 + gradBytes(resB.gradients);
+
+    size_t baseTotal   = lBytes + aBytes + bBytes;
+    size_t resTotal    = resLBytes + resABytes + resBBytes;
+    size_t headerBytes = 4 + 4;
+
+    std::cout << "\n|-----------------------------------------------------------|\n";
+    std::cout << "|             SIF Per-Channel File Breakdown               |\n";
+    std::cout << "|-----------------------------------------------------------|\n";
+    std::cout << "| Section               | Bytes   |  bpp   |    % file  |\n";
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("Header",               headerBytes);
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("L channel (base)",     lBytes);
+    row("  - palette",          palBytes1D(baseL.palette));
+    row("  - RLE stream",       (lBits + 7) / 8);
+    row("  - gradients",        gradBytes(gradsL));
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("A channel (base)",     aBytes);
+    row("  - palette",          palBytes1D(baseA.palette));
+    row("  - RLE stream",       (aBits + 7) / 8);
+    row("  - gradients",        gradBytes(gradsA));
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("B channel (base)",     bBytes);
+    row("  - palette",          palBytes1D(baseB.palette));
+    row("  - RLE stream",       (bBits + 7) / 8);
+    row("  - gradients",        gradBytes(gradsB));
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("BASE TOTAL",           baseTotal);
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("Residual L",           resLBytes);
+    row("  - palette",          palBytes1D(resL.palette));
+    row("  - RLE stream",       (resLBits + 7) / 8);
+    row("  - gradients",        gradBytes(resL.gradients));
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("Residual A",           resABytes);
+    row("  - palette",          palBytes1D(resA.palette));
+    row("  - RLE stream",       (resABits + 7) / 8);
+    row("  - gradients",        gradBytes(resA.gradients));
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("Residual B",           resBBytes);
+    row("  - palette",          palBytes1D(resB.palette));
+    row("  - RLE stream",       (resBBits + 7) / 8);
+    row("  - gradients",        gradBytes(resB.gradients));
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("RESIDUAL TOTAL",       resTotal);
+    std::cout << "|-----------------------------------------------------------|\n";
+    row("TOTAL",                fileSize);
+    std::cout << "|-----------------------------------------------------------|\n";
+
+    std::cout << "\n--- Summary ---\n";
+    std::cout << "Image:           " << width << "x" << height
+              << " (" << totalPixels << " pixels)\n";
+    std::cout << "Original RGB:    " << (totalPixels * 3) / 1024 << " KB\n";
+    std::cout << "SIF File:        " << fileSize / 1024          << " KB\n";
+    std::cout << "Bits Per Pixel:  " << std::fixed << std::setprecision(3) << bpp << " bpp\n";
+    std::cout << "Compression:     " << std::setprecision(2)
+              << (float)(totalPixels * 24) / (float)(fileSize * 8) << ":1\n";
+    std::cout << "Base  overhead:  " << std::setprecision(1)
+              << (float)baseTotal * 100.0f / (float)fileSize << "% of file\n";
+    std::cout << "Resid overhead:  "
+              << (float)resTotal  * 100.0f / (float)fileSize << "% of file\n";
+    std::cout << "Location: "
+              << std::filesystem::absolute(path) << "\n";
+}
+
+
+
+
+
+
 int main(int argc, char* argv[]) {
    
 
@@ -380,7 +722,11 @@ int main(int argc, char* argv[]) {
 
 
 
-
+    saveSIF_perChannel("output.sif", width, height,
+    baseL, gradsL,
+    baseA, gradsA,
+    baseB, gradsB,
+    residualL, residualA, residualB);
 
 
 
