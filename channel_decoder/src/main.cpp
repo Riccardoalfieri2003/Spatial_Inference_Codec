@@ -71,6 +71,44 @@ std::vector<int> upsampleChannelMatrix(
 }
 
 
+std::vector<int> applyMED_decode(
+    const std::vector<int>& residuals,
+    int width, int height,
+    int paletteSize)
+{
+    std::vector<int> indexMatrix(width * height);
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int idx = y * width + x;
+
+            int prediction;
+            if (x == 0 && y == 0) {
+                prediction = 0;
+            } else if (y == 0) {
+                prediction = indexMatrix[idx - 1];
+            } else if (x == 0) {
+                prediction = indexMatrix[(y-1) * width];
+            } else {
+                int W  = indexMatrix[idx - 1];
+                int N  = indexMatrix[(y-1) * width + x];
+                int NW = indexMatrix[(y-1) * width + (x-1)];
+
+                if (NW >= std::max(W, N))
+                    prediction = std::min(W, N);
+                else if (NW <= std::min(W, N))
+                    prediction = std::max(W, N);
+                else
+                    prediction = W + N - NW;
+            }
+
+            indexMatrix[idx] = residuals[idx] - paletteSize + prediction;
+        }
+    }
+    return indexMatrix;
+}
+
+
 // ── Load per-channel SIF ──────────────────────────────────────────────────
 struct PerChannelData {
     int width = 0, height = 0;
@@ -90,12 +128,13 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
         return result;
     }
 
-    // ── Helper: decode a single channel section ───────────────────────────
     auto decodeSection = [&](
         std::vector<PaletteEntry>& pal,
         std::vector<int>& idxMatrix,
-        int totalPixels)
+        int matW, int matH)
     {
+        int totalPixels = matW * matH;
+
         uint16_t palSize = 0;
         file.read((char*)&palSize, 2);
         pal.resize(palSize);
@@ -106,9 +145,9 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
             p.a = 0.0f; p.b = 0.0f; p.error = 0.0f;
         }
 
-        // Read delta range
-        uint16_t deltaRange = 0;
-        file.read((char*)&deltaRange, 2);
+        // Read MED range
+        uint16_t medRange = 0;
+        file.read((char*)&medRange, 2);
 
         uint8_t  bitsPerIndex = 0;
         uint32_t maxRun       = 0;
@@ -136,9 +175,9 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
 
         auto streamStart = file.tellg();
 
-        // Decode RLE into delta values
-        std::vector<int> deltaValues;
-        deltaValues.reserve(totalPixels);
+        // Decode RLE into MED residuals
+        std::vector<int> medResiduals;
+        medResiduals.reserve(totalPixels);
         BitReader br(file);
         for (uint32_t i = 0; i < rleCount; i++) {
             int pairKey = decodeNext(root, br);
@@ -146,24 +185,16 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
             int value     =  pairKey / (int)(maxRun + 1);
             int runLength = (pairKey % (int)(maxRun + 1)) + 1;
             for (int r = 0; r < runLength; r++)
-                deltaValues.push_back(value);
+                medResiduals.push_back(value);
         }
 
         file.seekg(streamStart + (std::streamoff)byteCount);
         freeTree(root);
 
-        // Reconstruct indices from deltas
-        idxMatrix.reserve(totalPixels);
-        if (!deltaValues.empty()) {
-            idxMatrix.push_back(deltaValues[0]);
-            for (size_t i = 1; i < deltaValues.size(); i++) {
-                int idx = idxMatrix.back() + deltaValues[i] - (int)(deltaRange / 2);
-                idxMatrix.push_back(idx);
-            }
-        }
+        // Reconstruct indices using MED decode
+        idxMatrix = applyMED_decode(medResiduals, matW, matH, (int)(medRange / 2));
     };
 
-    // ── Helper: decode gradient section ──────────────────────────────────
     auto decodeGradientSection = [&](GradientData& gradients) {
         uint8_t precByte = 0;
         file.read((char*)&precByte, 1);
@@ -213,14 +244,19 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
         file.read((char*)&sh, 4);
         result.subW = (int)sw;
         result.subH = (int)sh;
+        // ── Read the subsample flag byte the encoder wrote ─────────────────
+        uint8_t subsampleFlag = 0;
+        file.read((char*)&subsampleFlag, 1);
     } else {
         result.subW = result.width;
         result.subH = result.height;
     }
 
-    int subPixels = result.subW * result.subH;
+    int matW = result.subW;
+    int matH = result.subH;
+
     std::cout << "Header: " << result.width << "x" << result.height
-              << " sub: " << result.subW << "x" << result.subH << "\n";
+              << " sub: " << matW << "x" << matH << "\n";
 
     // ── 2. Three channel layers ────────────────────────────────────────────
     auto decodeChannelLayer = [&](
@@ -236,7 +272,7 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
                       << " got 0x" << (int)magic << std::dec << "\n";
             return;
         }
-        decodeSection(pal, idxMatrix, subPixels);
+        decodeSection(pal, idxMatrix, matW, matH);
         decodeGradientSection(gradients);
         std::cout << "Channel decoded: palette=" << pal.size()
                   << " indices=" << idxMatrix.size() << "\n";
@@ -252,13 +288,13 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
     if (subsample) {
         std::cout << "Upsampling channels...\n";
         result.indexMatrixL = upsampleChannelMatrix(
-            result.indexMatrixL, result.subW, result.subH,
+            result.indexMatrixL, matW, matH,
             result.width, result.height, result.paletteL);
         result.indexMatrixA = upsampleChannelMatrix(
-            result.indexMatrixA, result.subW, result.subH,
+            result.indexMatrixA, matW, matH,
             result.width, result.height, result.paletteA);
         result.indexMatrixB = upsampleChannelMatrix(
-            result.indexMatrixB, result.subW, result.subH,
+            result.indexMatrixB, matW, matH,
             result.width, result.height, result.paletteB);
     }
 

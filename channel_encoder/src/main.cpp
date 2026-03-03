@@ -19,6 +19,51 @@
 #include "PaletteEntry.hpp"
 
 
+// ── Median Edge Detector (MED/LOCO-I predictor) ───────────────────────────
+// For each pixel, predicts its value from west (W), north (N), northwest (NW)
+// neighbors, then returns the prediction error (residual).
+// Encoding: store residuals instead of raw values
+// Decoding: reconstruct by adding prediction back to residual
+
+std::vector<int> applyMED_encode(
+    const std::vector<int>& indexMatrix,
+    int width, int height,
+    int paletteSize)
+{
+    std::vector<int> residuals(width * height);
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int idx = y * width + x;
+            int val = indexMatrix[idx];
+
+            int prediction;
+            if (x == 0 && y == 0) {
+                prediction = 0;
+            } else if (y == 0) {
+                prediction = indexMatrix[idx - 1];        // W
+            } else if (x == 0) {
+                prediction = indexMatrix[(y-1) * width];  // N (first col)
+            } else {
+                int W  = indexMatrix[idx - 1];
+                int N  = indexMatrix[(y-1) * width + x];
+                int NW = indexMatrix[(y-1) * width + (x-1)];
+
+                // MED predictor
+                if (NW >= std::max(W, N))
+                    prediction = std::min(W, N);
+                else if (NW <= std::min(W, N))
+                    prediction = std::max(W, N);
+                else
+                    prediction = W + N - NW;
+            }
+
+            // Residual stored offset by paletteSize to keep it positive
+            residuals[idx] = val - prediction + paletteSize;
+        }
+    }
+    return residuals;
+}
 
 // ── Subsample: keep only even-indexed rows and columns ────────────────────
 // Output dimensions: subW = width/2, subH = height/2
@@ -83,7 +128,8 @@ void saveSIF_perChannel(const std::string& path,
         const std::vector<int>& idxMatrix,
         std::vector<RLESymbol>& rleStream,
         std::map<int, std::pair<uint32_t,int>>& huffTable,
-        int& maxRun, int& bitsPerIndex)
+        int& maxRun, int& bitsPerIndex,
+        int matW, int matH)  // ← add width/height for MED
     {
         uint16_t palSize = (uint16_t)pal.size();
         file.write((char*)&palSize, 2);
@@ -95,27 +141,16 @@ void saveSIF_perChannel(const std::string& path,
         bitsPerIndex = 1;
         while ((1 << bitsPerIndex) < palSize) bitsPerIndex++;
 
-        // ── Delta prediction before RLE ───────────────────────────────────────
-        // Instead of encoding raw indices, encode the difference between
-        // each index and the previous one. This creates longer runs of 0s
-        // in smooth regions, improving RLE compression significantly.
-        // We use palette value differences to find the nearest palette entry
-        // for each delta — but for simplicity, just use index deltas directly.
-        // The delta is stored as: delta + palSize (to make it positive)
-        // so range is [0, 2*palSize-1]
-        std::vector<int> deltaMatrix(idxMatrix.size());
-        deltaMatrix[0] = idxMatrix[0];  // first value stored as-is
-        for (size_t i = 1; i < idxMatrix.size(); i++) {
-            deltaMatrix[i] = idxMatrix[i] - idxMatrix[i-1] + (int)palSize;
-        }
-        int deltaRange = 2 * (int)palSize;  // range of delta values
+        // ── MED prediction ────────────────────────────────────────────────────
+        std::vector<int> encoded = applyMED_encode(idxMatrix, matW, matH, (int)palSize);
+        int medRange = 2 * (int)palSize;  // residual range [0, 2*palSize-1]
 
-        // ── RLE on delta stream ───────────────────────────────────────────────
-        if (!deltaMatrix.empty()) {
-            int cur = deltaMatrix[0], run = 1;
-            for (size_t i = 1; i < deltaMatrix.size(); i++) {
-                if (deltaMatrix[i] == cur) { run++; }
-                else { rleStream.push_back({cur, run}); cur = deltaMatrix[i]; run = 1; }
+        // ── RLE on MED residuals ──────────────────────────────────────────────
+        if (!encoded.empty()) {
+            int cur = encoded[0], run = 1;
+            for (size_t i = 1; i < encoded.size(); i++) {
+                if (encoded[i] == cur) { run++; }
+                else { rleStream.push_back({cur, run}); cur = encoded[i]; run = 1; }
             }
             rleStream.push_back({cur, run});
         }
@@ -127,7 +162,7 @@ void saveSIF_perChannel(const std::string& path,
             return value * (maxRun + 1) + (run - 1);
         };
 
-        // ── Huffman entropy coding ────────────────────────────────────────────
+        // ── Huffman ───────────────────────────────────────────────────────────
         std::map<int,int> freq;
         for (auto& s : rleStream) freq[pairKey(s.value, s.runLength)]++;
 
@@ -146,9 +181,9 @@ void saveSIF_perChannel(const std::string& path,
             buildCodes(pq.top(), "", huffTable);
         }
 
-        // Write delta range so decoder can reconstruct
-        uint16_t deltaRangeU = (uint16_t)deltaRange;
-        file.write((char*)&deltaRangeU, 2);
+        // Write MED range so decoder can reconstruct
+        uint16_t medRangeU = (uint16_t)medRange;
+        file.write((char*)&medRangeU, 2);
 
         file.write((char*)&bitsPerIndex, 1);
         file.write((char*)&maxRun,       4);
@@ -180,6 +215,8 @@ void saveSIF_perChannel(const std::string& path,
         bw.flush();
     };
 
+
+   
     auto encodeGradientSection = [&](const GradientData& grad) {
         int precBits = (int)grad.precision;
         uint8_t precByte = (uint8_t)grad.precision;
@@ -216,10 +253,12 @@ void saveSIF_perChannel(const std::string& path,
         const std::vector<PaletteEntry>& pal,
         const std::vector<int>& idxMatrix,
         const GradientData& grad,
-        ChannelStats& stats)
+        ChannelStats& stats,
+        int matW, int matH)  // ← add dims
     {
         file.write((char*)&magic, 1);
-        encodeSection(pal, idxMatrix, stats.rle, stats.huff, stats.maxRun, stats.bitsPerIndex);
+        encodeSection(pal, idxMatrix, stats.rle, stats.huff, 
+                    stats.maxRun, stats.bitsPerIndex, matW, matH);
         encodeGradientSection(grad);
     };
 
@@ -243,14 +282,16 @@ void saveSIF_perChannel(const std::string& path,
     // ── 2. Three channel layers ───────────────────────────────────────────────
     // Magic bytes: 0xC1=L channel, 0xC2=A channel, 0xC3=B channel
     ChannelStats statsL, statsA, statsB;
+    int matW = subsample ? subW : width;
+    int matH = subsample ? subH : height;
     if(subsample){
-        encodeChannelLayer(0xC1, paletteL, idxL, gradientsL, statsL);
-        encodeChannelLayer(0xC2, paletteA, idxA, gradientsA, statsA);
-        encodeChannelLayer(0xC3, paletteB, idxB, gradientsB, statsB);
+        encodeChannelLayer(0xC1, paletteL, idxL, gradientsL, statsL, matW, matH);
+        encodeChannelLayer(0xC2, paletteA, idxA, gradientsA, statsA, matW, matH);
+        encodeChannelLayer(0xC3, paletteB, idxB, gradientsB, statsB, matW, matH);
     }else{
-        encodeChannelLayer(0xC1, paletteL, indexMatrixL, gradientsL, statsL);
-        encodeChannelLayer(0xC2, paletteA, indexMatrixA, gradientsA, statsA);
-        encodeChannelLayer(0xC3, paletteB, indexMatrixB, gradientsB, statsB);
+        encodeChannelLayer(0xC1, paletteL, indexMatrixL, gradientsL, statsL, matW, matH);
+        encodeChannelLayer(0xC2, paletteA, indexMatrixA, gradientsA, statsA, matW, matH);
+        encodeChannelLayer(0xC3, paletteB, indexMatrixB, gradientsB, statsB, matW, matH);
     }
 
     file.close();
@@ -384,8 +425,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Per-channel Encoder: epsilonL=" << epsilonL
               << " epsilonA=" << epsilonA << " epsilonB=" << epsilonB << "\n";
 
-    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
-    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
+    const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png";
+    //const char* filename = "C:\\Users\\rical\\OneDrive\\Desktop\\Wallpaper\\Napoli.png";
 
     int width, height, channels;
     unsigned char* imgData = stbi_load(filename, &width, &height, &channels, 0);
@@ -548,7 +589,7 @@ int main(int argc, char* argv[]) {
                    palEntL, indexMatrixL, gradientsL,
                    palEntA, indexMatrixA, gradientsA,
                    palEntB, indexMatrixB, gradientsB,
-                   true);
+                   false);
 
 
 
