@@ -109,6 +109,111 @@ std::vector<int> applyMED_decode(
 }
 
 
+
+// ── Upsample L channel (was even-sampled) ────────────────────────────────
+std::vector<int> upsampleChannelMatrix_even(
+    const std::vector<int>& sub,
+    int subW, int subH,
+    int origW, int origH,
+    const std::vector<PaletteEntry>& palette)
+{
+    std::vector<int> full(origW * origH, 0);
+
+    auto blendIdx = [&](int idxA, int idxB) -> int {
+        float avg = (palette[idxA].L + palette[idxB].L) * 0.5f;
+        int best = 0;
+        float bestDist = std::abs(palette[0].L - avg);
+        for (int i = 1; i < (int)palette.size(); i++) {
+            float dist = std::abs(palette[i].L - avg);
+            if (dist < bestDist) { bestDist = dist; best = i; }
+        }
+        return best;
+    };
+
+    // Place known pixels at even positions
+    for (int y = 0; y < subH; y++)
+        for (int x = 0; x < subW; x++)
+            full[(y * 2) * origW + (x * 2)] = sub[y * subW + x];
+
+    // Fill horizontal gaps (odd columns, even rows)
+    for (int y = 0; y < origH; y += 2) {
+        for (int x = 1; x < origW - 1; x += 2) {
+            int left  = full[y * origW + (x - 1)];
+            int right = full[y * origW + std::min(x + 1, origW - 1)];
+            full[y * origW + x] = blendIdx(left, right);
+        }
+        if (origW % 2 == 0)
+            full[y * origW + (origW - 1)] = full[y * origW + (origW - 2)];
+    }
+
+    // Fill vertical gaps (odd rows)
+    for (int y = 1; y < origH - 1; y += 2) {
+        for (int x = 0; x < origW; x++) {
+            int top    = full[(y - 1) * origW + x];
+            int bottom = full[std::min(y + 1, origH - 1) * origW + x];
+            full[y * origW + x] = blendIdx(top, bottom);
+        }
+    }
+    if (origH % 2 == 0)
+        for (int x = 0; x < origW; x++)
+            full[(origH - 1) * origW + x] = full[(origH - 2) * origW + x];
+
+    return full;
+}
+
+// ── Upsample A/B channels (was odd-sampled) ──────────────────────────────
+std::vector<int> upsampleChannelMatrix_odd(
+    const std::vector<int>& sub,
+    int subW, int subH,
+    int origW, int origH,
+    const std::vector<PaletteEntry>& palette)
+{
+    std::vector<int> full(origW * origH, 0);
+
+    auto blendIdx = [&](int idxA, int idxB) -> int {
+        float avg = (palette[idxA].L + palette[idxB].L) * 0.5f;
+        int best = 0;
+        float bestDist = std::abs(palette[0].L - avg);
+        for (int i = 1; i < (int)palette.size(); i++) {
+            float dist = std::abs(palette[i].L - avg);
+            if (dist < bestDist) { bestDist = dist; best = i; }
+        }
+        return best;
+    };
+
+    // Place known pixels at odd positions
+    for (int y = 0; y < subH; y++)
+        for (int x = 0; x < subW; x++)
+            full[(y * 2 + 1) * origW + (x * 2 + 1)] = sub[y * subW + x];
+
+    // Fill horizontal gaps (even columns, odd rows)
+    for (int y = 1; y < origH; y += 2) {
+        // First column (x=0): copy from x=1 if available
+        full[y * origW + 0] = (origW > 1) ? full[y * origW + 1] : 0;
+        for (int x = 2; x < origW - 1; x += 2) {
+            int left  = full[y * origW + (x - 1)];
+            int right = full[y * origW + std::min(x + 1, origW - 1)];
+            full[y * origW + x] = blendIdx(left, right);
+        }
+        if (origW % 2 == 1)
+            full[y * origW + (origW - 1)] = full[y * origW + (origW - 2)];
+    }
+
+    // Fill vertical gaps (even rows)
+    for (int y = 0; y < origH; y += 2) {
+        for (int x = 0; x < origW; x++) {
+            int top    = (y > 0)         ? full[(y - 1) * origW + x] : full[(y + 1) * origW + x];
+            int bottom = (y + 1 < origH) ? full[(y + 1) * origW + x] : top;
+            full[y * origW + x] = blendIdx(top, bottom);
+        }
+    }
+
+    return full;
+}
+
+
+
+
 // ── Load per-channel SIF ──────────────────────────────────────────────────
 struct PerChannelData {
     int width = 0, height = 0;
@@ -145,7 +250,6 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
             p.a = 0.0f; p.b = 0.0f; p.error = 0.0f;
         }
 
-        // Read MED range
         uint16_t medRange = 0;
         file.read((char*)&medRange, 2);
 
@@ -175,7 +279,6 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
 
         auto streamStart = file.tellg();
 
-        // Decode RLE into MED residuals
         std::vector<int> medResiduals;
         medResiduals.reserve(totalPixels);
         BitReader br(file);
@@ -191,7 +294,6 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
         file.seekg(streamStart + (std::streamoff)byteCount);
         freeTree(root);
 
-        // Reconstruct indices using MED decode
         idxMatrix = applyMED_decode(medResiduals, matW, matH, (int)(medRange / 2));
     };
 
@@ -238,32 +340,35 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
     result.width  = (int)w;
     result.height = (int)h;
 
+    // L uses odd sampling, A/B use even — separate dims
+    int matWL = result.width,  matHL = result.height;
+    int matWAB = result.width, matHAB = result.height;
+
     if (subsample) {
-        uint32_t sw = 0, sh = 0;
-        file.read((char*)&sw, 4);
-        file.read((char*)&sh, 4);
-        result.subW = (int)sw;
-        result.subH = (int)sh;
-        // ── Read the subsample flag byte the encoder wrote ─────────────────
-        uint8_t subsampleFlag = 0;
-        file.read((char*)&subsampleFlag, 1);
+        uint32_t swL = 0, shL = 0, swAB = 0, shAB = 0;
+        file.read((char*)&swL,  4);
+        file.read((char*)&shL,  4);
+        file.read((char*)&swAB, 4);
+        file.read((char*)&shAB, 4);
+        matWL  = (int)swL;  matHL  = (int)shL;
+        matWAB = (int)swAB; matHAB = (int)shAB;
+        result.subW = matWL; result.subH = matHL;
     } else {
         result.subW = result.width;
         result.subH = result.height;
     }
 
-    int matW = result.subW;
-    int matH = result.subH;
-
     std::cout << "Header: " << result.width << "x" << result.height
-              << " sub: " << matW << "x" << matH << "\n";
+              << " | L sub: " << matWL << "x" << matHL
+              << " | AB sub: " << matWAB << "x" << matHAB << "\n";
 
     // ── 2. Three channel layers ────────────────────────────────────────────
     auto decodeChannelLayer = [&](
         uint8_t expectedMagic,
         std::vector<PaletteEntry>& pal,
         std::vector<int>& idxMatrix,
-        GradientData& gradients)
+        GradientData& gradients,
+        int matW, int matH)
     {
         uint8_t magic = 0;
         file.read((char*)&magic, 1);
@@ -278,23 +383,29 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
                   << " indices=" << idxMatrix.size() << "\n";
     };
 
-    decodeChannelLayer(0xC1, result.paletteL, result.indexMatrixL, result.gradientsL);
-    decodeChannelLayer(0xC2, result.paletteA, result.indexMatrixA, result.gradientsA);
-    decodeChannelLayer(0xC3, result.paletteB, result.indexMatrixB, result.gradientsB);
+    // L decoded at its own dims, A/B at their dims
+    decodeChannelLayer(0xC1, result.paletteL, result.indexMatrixL,
+                       result.gradientsL, matWL,  matHL);
+    decodeChannelLayer(0xC2, result.paletteA, result.indexMatrixA,
+                       result.gradientsA, matWAB, matHAB);
+    decodeChannelLayer(0xC3, result.paletteB, result.indexMatrixB,
+                       result.gradientsB, matWAB, matHAB);
 
     file.close();
 
     // ── 3. Upsample if subsampled ──────────────────────────────────────────
     if (subsample) {
         std::cout << "Upsampling channels...\n";
-        result.indexMatrixL = upsampleChannelMatrix(
-            result.indexMatrixL, matW, matH,
+        // L was odd-sampled → upsample with odd variant
+        result.indexMatrixL = upsampleChannelMatrix_odd(
+            result.indexMatrixL, matWL, matHL,
             result.width, result.height, result.paletteL);
-        result.indexMatrixA = upsampleChannelMatrix(
-            result.indexMatrixA, matW, matH,
+        // A/B were even-sampled → upsample with even variant
+        result.indexMatrixA = upsampleChannelMatrix_even(
+            result.indexMatrixA, matWAB, matHAB,
             result.width, result.height, result.paletteA);
-        result.indexMatrixB = upsampleChannelMatrix(
-            result.indexMatrixB, matW, matH,
+        result.indexMatrixB = upsampleChannelMatrix_even(
+            result.indexMatrixB, matWAB, matHAB,
             result.width, result.height, result.paletteB);
     }
 
@@ -302,14 +413,13 @@ PerChannelData loadSIF_perChannel(const std::string& path, bool subsample) {
     return result;
 }
 
-
 // ── Decoder main ──────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
 
     std::string filePath = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\build\\output_per_channel.sif";
     if (argc > 1) filePath = argv[1];
 
-    bool subsample = false;  // ← toggle manually to match encoder setting
+    bool subsample = true;  // ← toggle manually to match encoder setting
 
     std::cout << "Loading: " << filePath << "\n";
 

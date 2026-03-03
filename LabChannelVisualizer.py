@@ -122,6 +122,6 @@ def compare_lab_differences(orig_path, recon_path):
 orig = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\encoder\\data\\images\\Lenna.png"
 #recon = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\build\\out_full_reconstruction.png"
 
-recon = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\build\\out_per_channel_reconstruction.png"
+recon = "C:\\Users\\rical\\OneDrive\\Desktop\\Spatial_Inference_Codec\\build\\output_per_channel.sif_reconstructed.png"
 compare_lab_differences(orig, recon)
 
