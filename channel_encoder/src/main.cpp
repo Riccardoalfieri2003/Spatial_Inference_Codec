@@ -536,6 +536,7 @@ void saveSIF_perChannel(const std::string& path,
 
 
 int main(int argc, char* argv[]) {
+    
     if (argc < 7) {
         std::cerr << "Usage: " << argv[0]
                   << " <epsilonL> <epsilonA> <epsilonB> <maxStepsL> <maxStepsA> <maxStepsB>\n";
