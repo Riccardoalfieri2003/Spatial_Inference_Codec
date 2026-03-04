@@ -161,6 +161,43 @@ ChannelResult encodeChannelResiduals(
 
 
 
+ChannelResult encodeChannelResiduals_pro(
+    const std::vector<float>& originalChannel,
+    const std::vector<float>& reconstructed,
+    int width, int height,
+    float epsilonRes, int maxStepsRes,
+    const std::string& label = "")
+{
+    // 1. Residuals — reconstruction already done externally
+    std::vector<float> residuals(width * height);
+    for (int i = 0; i < width * height; i++)
+        residuals[i] = originalChannel[i] - reconstructed[i];
+
+    // ── Debug ─────────────────────────────────────────────────────────────────
+    float minRes = *std::min_element(residuals.begin(), residuals.end());
+    float maxRes = *std::max_element(residuals.begin(), residuals.end());
+    float sumAbsRes = 0.0f;
+    for (float r : residuals) sumAbsRes += std::abs(r);
+    float meanAbsRes = sumAbsRes / residuals.size();
+
+    float minRecon = *std::min_element(reconstructed.begin(), reconstructed.end());
+    float maxRecon = *std::max_element(reconstructed.begin(), reconstructed.end());
+
+    std::cout << "[encodeChannelResiduals] " << label << "\n"
+              << "  Reconstructed range : [" << minRecon << ", " << maxRecon << "]\n"
+              << "  Residual range      : [" << minRes   << ", " << maxRes   << "]\n"
+              << "  Residual mean |err| : " << meanAbsRes << "\n";
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // 2. Quantize residuals
+    auto resQuant = quantizeChannel(residuals, width, height, epsilonRes, maxStepsRes, label + "_residual");
+
+    // 3. Encode residual gradients
+    auto resGrads = encodeChannelGradients(resQuant.indexMatrix, residuals, width, height, label + "_residual");
+
+    return { resQuant.palette, resQuant.indexMatrix, resGrads };
+}
+
 
 
 
@@ -618,6 +655,115 @@ void saveSIF_perChannel(const std::string& path,
 
 
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// subsampleMatrix
+//
+// Keeps only odd rows and odd columns (0-indexed), i.e. rows/cols 1, 3, 5, ...
+// The original width and height are needed by the decoder to reconstruct.
+//
+// Input:  matrix[row * width + col],  size = width * height
+// Output: matrix[row * outWidth + col], size = outWidth * outHeight
+//
+// outWidth  = width  / 2
+// outHeight = height / 2
+// ─────────────────────────────────────────────────────────────────────────────
+std::vector<float> subsampleMatrix(
+    const std::vector<float>& matrix,
+    int width, int height,
+    int& outWidth, int& outHeight)
+{
+    outWidth  = width  / 2;
+    outHeight = height / 2;
+
+    std::vector<float> result(outWidth * outHeight);
+
+    for (int row = 0; row < outHeight; ++row) {
+        for (int col = 0; col < outWidth; ++col) {
+            float srcRow = row * 2 + 1; // odd rows: 1, 3, 5, ...
+            float srcCol = col * 2 + 1; // odd cols: 1, 3, 5, ...
+            result[row * outWidth + col] = matrix[srcRow * width + srcCol];
+        }
+    }
+
+    return result;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// upsampleMatrix
+//
+// Reconstructs a full matrix from a subsampled one.
+// Even rows and even columns are filled by nearest-neighbour from the
+// closest odd neighbour (the one that was kept during subsampling).
+//
+// origWidth / origHeight: the dimensions of the matrix BEFORE subsampling.
+// ─────────────────────────────────────────────────────────────────────────────
+std::vector<float> upsampleMatrix(
+    const std::vector<float>& subMatrix,
+    int subWidth, int subHeight,
+    int origWidth, int origHeight)
+{
+    std::vector<float> result(origWidth * origHeight);
+
+    for (int row = 0; row < origHeight; ++row) {
+        for (int col = 0; col < origWidth; ++col) {
+
+            // Map back to the nearest odd source position
+            int srcRow = (row - 1) / 2; // nearest odd row index in subMatrix
+            int srcCol = (col - 1) / 2; // nearest odd col index in subMatrix
+
+            // Clamp to valid subMatrix bounds
+            srcRow = std::max(0, std::min(srcRow, subHeight - 1));
+            srcCol = std::max(0, std::min(srcCol, subWidth  - 1));
+
+            result[row * origWidth + col] = subMatrix[srcRow * subWidth + srcCol];
+        }
+    }
+
+    return result;
+}
+
+
+
+
+
+
+std::vector<float> reconstructChannel(
+    const ChannelQuantization& base,
+    const GradientData& grads,
+    const ChannelResult& residual,
+    int width, int height)
+{
+    int totalPixels = width * height;
+
+    // Base + gradients
+    std::vector<LabF> recon(totalPixels);
+    std::vector<PaletteEntry> tempPal;
+    for (float p : base.palette) tempPal.push_back({p, 0, 0, 0});
+    for (int i = 0; i < totalPixels; ++i)
+        recon[i] = { base.palette[base.indexMatrix[i]], 0.0f, 0.0f };
+    applyGradients(recon, base.indexMatrix, tempPal, grads, width, height);
+
+    // Residuals
+    std::vector<LabF> reconRes(totalPixels);
+    std::vector<PaletteEntry> tempResPal;
+    for (float p : residual.palette) tempResPal.push_back({p, 0, 0, 0});
+    for (int i = 0; i < totalPixels; ++i)
+        reconRes[i] = { residual.palette[residual.indexMatrix[i]], 0.0f, 0.0f };
+    applyGradients(reconRes, residual.indexMatrix, tempResPal, residual.gradients, width, height);
+
+    // Combine
+    std::vector<float> result(totalPixels);
+    for (int i = 0; i < totalPixels; ++i)
+        result[i] = recon[i].L + reconRes[i].L;
+
+    return result;
+}
+
+
+
+
 int main(int argc, char* argv[]) {
    
 
@@ -658,6 +804,7 @@ int main(int argc, char* argv[]) {
     }
 
 
+    // LAYER 1
 
     // --- Process L (Luminance) ---
     auto baseL = quantizeChannel(channelL, width, height, epsilonL, maxStepsL, "L_base");
@@ -683,6 +830,67 @@ int main(int argc, char* argv[]) {
 
 
 
+    // LAYER 2
+
+    // --- Process L (Luminance) ---
+
+    // 1. Reconstruct previous channel
+    auto reconL1 = reconstructChannel(baseL, gradsL, residualL, width, height);
+    
+    // 1. Subsample the base index matrix
+    int subW, subH;
+    auto subIdxL = subsampleMatrix(reconL1, width, height, subW, subH);
+
+    // 2. Quantized subsampled matrix
+    auto baseL2 = quantizeChannel(subIdxL, subW, subH, epsilonL, maxStepsL, "L_base2");
+
+    // 3. Encode gradients on quantized sub matrix vs original sub channel values
+    auto gradsL2 = encodeChannelGradients(baseL2.indexMatrix, subIdxL, subW, subH, "L_base2");
+
+    // 4. Reconstruct at sub resolution (quantized + gradients) - stays as LabF for applyGradients
+    std::vector<LabF> reconSubL(subW * subH);
+    std::vector<PaletteEntry> tempPalL2;
+    for (float p : baseL2.palette) tempPalL2.push_back({p, 0, 0, 0});
+    for (int i = 0; i < subW * subH; ++i)
+        reconSubL[i] = { baseL2.palette[baseL2.indexMatrix[i]], 0.0f, 0.0f };
+    applyGradients(reconSubL, baseL2.indexMatrix, tempPalL2, gradsL2, subW, subH);
+
+    // 4.5 Extract LabF::L into a flat float vector for upsampling
+    std::vector<float> flatReconSubL(subW * subH);
+    for (int i = 0; i < subW * subH; ++i) {
+        flatReconSubL[i] = reconSubL[i].L;
+    }
+
+    // 5. Upsample the flat float vector
+    auto upsampledIdxL2 = upsampleMatrix(flatReconSubL, subW, subH, width, height);
+
+    auto residualL2 = encodeChannelResiduals_pro(reconL1, upsampledIdxL2, width, height, epsilonL, maxStepsL, "L");
+
+    std::cout<<"Siamo qui ora"<<std::endl;
+
+    auto reconL2 = reconstructChannel(baseL2, gradsL2 , residualL2, width, height);
+
+
+    for (int i = 0; i < width * height; ++i)
+        std::cout << reconL2[i] << "\n";
+
+
+
+
+
+    
+
+
+
+
+
+
+
+    
+
+
+
+    /*
 
     // Create a buffer for the output
     std::vector<unsigned char> outputRgb_noRes(width * height * 3);
@@ -729,7 +937,7 @@ int main(int argc, char* argv[]) {
     residualL, residualA, residualB);
 
 
-
+    */
 
 
 
